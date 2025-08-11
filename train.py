@@ -16,38 +16,26 @@ from peft import (
 import numpy as np
 import wandb
 import os
-import torch
-from typing import Optional
-from safetensors.torch import load_file
+import yaml
+import argparse
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", type=str, default="configs/ted_qlora_config_1.yaml")
+args = parser.parse_args()
 
-DATA_PATH = "dlp/extended_json_data/train.jsonl"      # JSONL with {"sequence": "...", "spans": "11-12_34-34"}
+config = yaml.safe_load(open(args.config, "r"))
 
-def get_the_latest_checkpoint(output_dir="./qlora_checkpoints"):
-    """Get the latest checkpoint from the checkpoints directory"""
-    if not os.path.exists(output_dir):
-        return None
-    
-    checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
-    if not checkpoints:
-        return None
-    
-    steps = [int(d.split("-")[1]) for d in checkpoints]
-    latest_index = np.argmax(steps)
-    latest_checkpoint = checkpoints[latest_index]
-    
-    return os.path.join(output_dir, latest_checkpoint)
+os.environ["CUDA_VISIBLE_DEVICES"] = config["cuda_visible_devices"]
 
-def setup_qlora_model(model_name: str, checkpoint_path: Optional[str] = None):
+def setup_qlora_model(model_name: str):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     # 4-bit quantization configuration - More conservative
     bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=False,  # Disabled for stability
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float32  # Use float32 for maximum stability
+        load_in_4bit=config["load_in_4bit"],
+        bnb_4bit_use_double_quant=config["bnb_4bit_use_double_quant"],  # Disabled for stability
+        bnb_4bit_quant_type=config["bnb_4bit_quant_type"],
+        bnb_4bit_compute_dtype=config["bnb_4bit_compute_dtype"]  # Use float32 for maximum stability
     )
     
     # Load model with quantization
@@ -60,13 +48,13 @@ def setup_qlora_model(model_name: str, checkpoint_path: Optional[str] = None):
     # Prepare model for k-bit training
     model = prepare_model_for_kbit_training(model)
     
-    # Very conservative LoRA configuration
+    # More effective LoRA configuration
     lora_config = LoraConfig(
-        r=4,  # Very low rank
-        lora_alpha=8,  # Very low alpha
-        target_modules=["q", "v"],  # Only target key modules
-        lora_dropout=0.0,  # No dropout
-        bias="none",
+        r=config["r"],                    # Higher rank for better expressiveness
+        lora_alpha=config["lora_alpha"],           # Higher alpha (typically 2*r)
+        target_modules=config["target_modules"],  # Target more attention modules
+        lora_dropout=config["lora_dropout"],        # Small dropout for regularization
+        bias=config["bias"],
         task_type=TaskType.SEQ_2_SEQ_LM,
         inference_mode=False,
     )
@@ -74,32 +62,13 @@ def setup_qlora_model(model_name: str, checkpoint_path: Optional[str] = None):
     # Apply LoRA
     model = get_peft_model(model, lora_config)
     
-    # Load checkpoint if provided
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from: {checkpoint_path}")
-        
-        # Try loading from safetensors first (newer format)
-        adapter_path_safetensors = os.path.join(checkpoint_path, "adapter_model.safetensors")
-        
-        if os.path.exists(adapter_path_safetensors):
-            print(f"Loading from safetensors: {adapter_path_safetensors}")
-            adapter_weights = load_file(adapter_path_safetensors)
-            model.load_state_dict(adapter_weights, strict=False)
-
-        else:
-            print(f"Warning: No adapter weights found in {checkpoint_path}")
-    
     # Print model info
     model.print_trainable_parameters()
     
     return model, tokenizer
 
-# Check for latest checkpoint
-checkpoint_path = get_the_latest_checkpoint()
-model_name = "t5-3b"
-
 # Setup model with QLoRA
-model, tokenizer = setup_qlora_model(model_name, checkpoint_path)
+model, tokenizer = setup_qlora_model(config["model_name"])
 
 CACHE_DIR = "extended_tokenized_ds/"
 if os.path.isdir(CACHE_DIR):
@@ -108,8 +77,8 @@ else:
     raw_ds = load_dataset(
         "json",
         data_files={
-            "train": DATA_PATH,
-            "validation": DATA_PATH.replace("train", "validation"),
+            "train": config["train_path"],
+            "validation": config["validation_path"],
         },
     )
 
@@ -168,28 +137,28 @@ def compute_metrics(eval_pred):
     return {"token_accuracy": sum(row_accuracies) / len(row_accuracies)}
 
 training_args = Seq2SeqTrainingArguments(
-    output_dir="qlora_checkpoints/",
-    run_name="QLoRA Training",
+    output_dir=config["output_dir"],
+    run_name=config["run_name"],
     
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=32,
-    gradient_accumulation_steps=8,
+    per_device_train_batch_size=config["per_device_train_batch_size"],
+    per_device_eval_batch_size=config["per_device_eval_batch_size"],
+    gradient_accumulation_steps=config["gradient_accumulation_steps"],
     
     eval_strategy="steps",
-    eval_steps=50,
-    save_steps=50,
-    logging_steps=5,
+    eval_steps=config["eval_steps"],
+    save_steps=config["save_steps"],
+    logging_steps=config["logging_steps"],
 
-    learning_rate=5e-5,
-    weight_decay=0.0,
+    learning_rate=float(config["learning_rate"]),
+    weight_decay=float(config["weight_decay"]),
     predict_with_generate=True,
     
-    num_train_epochs=1,
-    save_total_limit=1,
+    num_train_epochs=config["num_train_epochs"],
+    save_total_limit=config["save_total_limit"],
     
-    max_grad_norm=0.1,
-    
-    resume_from_checkpoint=checkpoint_path if checkpoint_path else None,
+    max_grad_norm=config["max_grad_norm"],
+    dataloader_pin_memory=config["dataloader_pin_memory"],
+    dataloader_num_workers=config["dataloader_num_workers"],
 )
 
 trainer = Seq2SeqTrainer(

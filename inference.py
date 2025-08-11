@@ -61,56 +61,6 @@ def setup_qlora_model(model_name: str, checkpoint_path: Optional[str] = None):
 
     # 5. Set to evaluation
     model.eval()
-
-    # # 4-bit quantization config
-    # bnb_config = BitsAndBytesConfig(
-    #     load_in_4bit=True,
-    #     bnb_4bit_use_double_quant=False,
-    #     bnb_4bit_quant_type="nf4",
-    #     bnb_4bit_compute_dtype=torch.float32
-    # )
-
-    # # Load base model with quantization
-    # model = AutoModelForSeq2SeqLM.from_pretrained(
-    #     model_name,
-    #     quantization_config=bnb_config,
-    #     device_map="auto",
-    # )
-
-    # # Prepare for k-bit training (required for LoRA)
-    # model = prepare_model_for_kbit_training(model)
-
-    # # LoRA config (should match training)
-    # lora_config = LoraConfig(
-    #     r=4,
-    #     lora_alpha=8,
-    #     target_modules=["q", "v"],
-    #     lora_dropout=0.0,
-    #     bias="none",
-    #     task_type=TaskType.SEQ_2_SEQ_LM,
-    #     inference_mode=True,  # Set to True for inference!
-    # )
-
-    # # Apply LoRA wrapper
-    # model = get_peft_model(model, lora_config)
-    
-    # # Load checkpoint if provided
-    # if checkpoint_path and os.path.exists(checkpoint_path):
-    #     print(f"Loading checkpoint from: {checkpoint_path}")
-        
-    #     # Try loading from safetensors first (newer format)
-    #     adapter_path_safetensors = os.path.join(checkpoint_path, "adapter_model.safetensors")
-        
-    #     if os.path.exists(adapter_path_safetensors):
-    #         print(f"Loading from safetensors: {adapter_path_safetensors}")
-    #         adapter_weights = load_file(adapter_path_safetensors)
-    #         model.load_state_dict(adapter_weights, strict=False)
-
-    #     else:
-    #         print(f"Warning: No adapter weights found in {checkpoint_path}")
-    
-    # # Print model info
-    # model.print_trainable_parameters()
     
     return model, tokenizer
 class QLoRAInference:
