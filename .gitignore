@@ -1,0 +1,10 @@
+wandb/
+qlora_checkpoints/
+esm/
+git_command.txt
+output.txt
+data/export_pqt_0_ted/
+dlp/jsons/
+extended_tokenized_ds/
+results.csv
+data/key.json
