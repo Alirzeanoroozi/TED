@@ -22,7 +22,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 DATA_PATH = "dlp/extended_json_data/validation.jsonl"      # JSONL with {"sequence": "...", "spans": "11-12_34-34"}
 
-def get_the_latest_checkpoint(output_dir="./qlora_checkpoints"):
+def get_the_latest_checkpoint(output_dir="./qlora_16_checkpoints"):
     """Get the latest checkpoint from the checkpoints directory"""
     if not os.path.exists(output_dir):
         return None
@@ -43,7 +43,7 @@ def setup_qlora_model(model_name: str, checkpoint_path: Optional[str] = None):
     """
     # Always load tokenizer from base model name
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    peft_model_path = "qlora_checkpoints/checkpoint-1050"
+    peft_model_path = "qlora_16_checkpoints/checkpoint-30504"
     peft_config = PeftConfig.from_pretrained(peft_model_path)
 
     # 2. Load base model (same model used before QLoRA fine-tuning)
