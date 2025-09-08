@@ -1,7 +1,8 @@
 wandb/
-qlora_checkpoints/
-esm/embeddings/
 data/export_pqt_0_ted/
 data/key.json
 dlp/jsons/
-extended_tokenized_ds/
+esm/embeddings/
+LoRA/qlora_checkpoints/
+LoRA/extended_tokenized_ds/
+LoRA/transformer_extended_tokenized_ds/
