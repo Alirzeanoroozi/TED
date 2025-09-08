@@ -1,10 +1,7 @@
 wandb/
 qlora_checkpoints/
-esm/
-git_command.txt
-output.txt
+esm/embeddings/
 data/export_pqt_0_ted/
+data/key.json
 dlp/jsons/
 extended_tokenized_ds/
-results.csv
-data/key.json
