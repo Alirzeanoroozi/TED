@@ -2,14 +2,13 @@ from pathlib import Path
 
 def get_config():
     return {
-        "batch_size": 2,
-        "num_epochs": 20,
+        "batch_size": 4,
+        "val_epochs": 200,
         "lr": 10**-4,
         "src_vocab_size": 25,
         "tgt_vocab_size": 20,
-        "src_seq_len": 1024,
-        "tgt_seq_len": 1024,
-        "d_model": 512,
+        "seq_len": 1024,
+        "d_model": 960,
         "model_folder": "weights",
         "model_basename": "tmodel_",
         "preload": "latest",

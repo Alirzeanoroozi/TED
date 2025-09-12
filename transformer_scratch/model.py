@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import math
+from esm.models.esmc import ESMC
+from esm.sdk.api import ESMProtein, LogitsConfig
 
 class LayerNormalization(nn.Module):
     def __init__(self, features: int, eps:float=10**-6) -> None:
@@ -210,6 +212,48 @@ class Transformer(nn.Module):
     def project(self, x):
         # (batch, seq_len, vocab_size)
         return self.projection_layer(x)
+
+class Transformer_ESMC(nn.Module):
+    def __init__(self, encoder, decoder: Decoder, tgt_embed: InputEmbeddings, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer) -> None:
+        super().__init__()
+        self.esmc_encoder = encoder
+        self.decoder = decoder
+        self.tgt_embed = tgt_embed
+        self.tgt_pos = tgt_pos
+        self.projection_layer = projection_layer
+
+    @torch.no_grad()
+    def encode(self, src, src_mask):
+        seq_embeds = []
+        for seq in src:
+            protein = ESMProtein(sequence=seq)
+            protein_tensor = self.esmc_encoder.encode(protein)
+            logits_output = self.esmc_encoder.logits(protein_tensor, LogitsConfig(sequence=True, return_embeddings=True))
+            seq_embed = logits_output.embeddings[0] # torch.Size([len, 960])
+            # Pad seq_embed to match src_mask length (seq_len)
+            seq_len = src_mask.shape[3]
+            
+            if seq_embed.shape[0] < seq_len:
+                pad_size = seq_len - seq_embed.shape[0]
+                pad = torch.zeros(pad_size, *seq_embed.shape[1:], device=seq_embed.device, dtype=seq_embed.dtype)
+                seq_embed = torch.cat([seq_embed, pad], dim=0)
+            elif seq_embed.shape[0] > seq_len:
+                seq_embed = seq_embed[:seq_len]
+            seq_embeds.append(seq_embed)
+            
+        seq_embeds = torch.stack(seq_embeds)
+        # (batch, seq_len, d_model)
+        return seq_embeds
+    
+    def decode(self, encoder_output: torch.Tensor, src_mask: torch.Tensor, tgt: torch.Tensor, tgt_mask: torch.Tensor):
+        # (batch, seq_len, d_model)
+        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_pos(tgt)
+        return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
+    
+    def project(self, x):
+        # (batch, seq_len, vocab_size)
+        return self.projection_layer(x)
     
 def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int=512, N: int=6, h: int=8, dropout: float=0.1, d_ff: int=2048) -> Transformer:
     # Create the embedding layers
@@ -249,6 +293,38 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     
     # Initialize the parameters
     for p in transformer.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+    
+    return transformer
+
+def build_transformer_esmc(tgt_vocab_size: int, tgt_seq_len: int, d_model: int=512, N: int=6, h: int=8, dropout: float=0.1, d_ff: int=2048) -> Transformer_ESMC:
+    client = ESMC.from_pretrained("esmc_300m")
+    for param in client.parameters():
+        param.requires_grad = False
+    # Create the embedding layers
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
+    tgt_pos = PositionalEncoding(d_model, tgt_seq_len, dropout)
+    
+    # Create the decoder blocks
+    decoder_blocks = []
+    for _ in range(N):
+        decoder_self_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        decoder_cross_attention_block = MultiHeadAttentionBlock(d_model, h, dropout)
+        feed_forward_block = FeedForwardBlock(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(d_model, decoder_self_attention_block, decoder_cross_attention_block, feed_forward_block, dropout)
+        decoder_blocks.append(decoder_block)
+        
+    # Create the decoder
+    decoder = Decoder(d_model, nn.ModuleList(decoder_blocks))
+    
+    # Create the projection layer
+    projection_layer = ProjectionLayer(d_model, tgt_vocab_size)
+    
+    # Create the transformer
+    transformer = Transformer_ESMC(client, decoder, tgt_embed, tgt_pos, projection_layer)
+
+    for p in decoder.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
     

@@ -8,7 +8,7 @@ from tokenizers.trainers import BpeTrainer
 from pathlib import Path
 from tqdm import tqdm
 import os
-os.makedirs("../tokenizers", exist_ok=True)
+os.makedirs("tokenizers", exist_ok=True)
 
 train_path = "../dlp/jsons/ted_train.json"
 validation_path = "../dlp/jsons/ted_validation.json"
@@ -40,11 +40,11 @@ def get_ds(config):
     )
 
     # Build tokenizers
-    tokenizer_src = get_or_build_tokenizer(Path("../tokenizers/tokenizer_src.json"), raw_ds["train"], "Sequence", config['src_vocab_size'])
-    tokenizer_tgt = get_or_build_tokenizer(Path("../tokenizers/tokenizer_tgt.json"), raw_ds["train"], "label", config['tgt_vocab_size'])
+    tokenizer_src = get_or_build_tokenizer(Path("tokenizers/tokenizer_src.json"), raw_ds["train"], "Sequence", config['src_vocab_size'])
+    tokenizer_tgt = get_or_build_tokenizer(Path("tokenizers/tokenizer_tgt.json"), raw_ds["train"], "label", config['tgt_vocab_size'])
     
-    train_ds = BilingualDataset(raw_ds["train"], tokenizer_src, tokenizer_tgt, "Sequence", "label", config['src_seq_len'])
-    val_ds = BilingualDataset(raw_ds["validation"], tokenizer_src, tokenizer_tgt, "Sequence", "label", config['tgt_seq_len'])
+    train_ds = BilingualDataset(raw_ds["train"], tokenizer_src, tokenizer_tgt, "Sequence", "label", config['seq_len'])
+    val_ds = BilingualDataset(raw_ds["validation"], tokenizer_src, tokenizer_tgt, "Sequence", "label", config['seq_len'])
 
     # Find the maximum length of each sentence in the source and target sentence
     # max_len_src = 0
