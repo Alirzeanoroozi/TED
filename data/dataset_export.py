@@ -1,10 +1,12 @@
 import os
 from google.cloud import bigquery, storage
 from google.cloud.storage import Bucket
-from jsonargparse import CLI
+import sys
 
 GCP_KEYFILE_PATH = 'key.json'
 PROJECT_ID = "pfsdb3"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_KEYFILE_PATH
+
 bq_client = bigquery.Client()
 
 def make_export_url(table: str, bucket: str):
@@ -14,10 +16,13 @@ def list_tables(dataset):
     dataset_id = f'{PROJECT_ID}.{dataset}'
     tables = bq_client.list_tables(dataset_id)
 
+    # Convert iterator to list first to avoid consuming it twice
+    table_list = list(tables)
+    
     print("Tables contained in '{}':".format(dataset_id))
-    for table in tables:
+    for table in table_list:
         print("\t{}".format(table.table_id))
-    return [table.table_id for table in tables]
+    return [table.table_id for table in table_list]
 
 def export_table(dataset, table, bucket):
     destination_uri = make_export_url(table, bucket)
@@ -40,7 +45,6 @@ def create_bucket_class_location(bucket_name):
     Create a new bucket in the US region with the coldline storage
     class
     """
-    # bucket_name = "your-new-bucket-name"
 
     storage_client = storage.Client()
 
@@ -56,17 +60,19 @@ def create_bucket_class_location(bucket_name):
     return new_bucket
 
 def export_dataset(dataset):
-    tables = list_tables(dataset)
-    bucket = f'export_pqt_{dataset}'
+    # tables = list_tables(dataset)
+    
+    bucket = f'export_pqt_{dataset}_new'
     print (f'Exporting to bucket : {bucket}')
     client = storage.Client()
-    exists = Bucket(client, bucket).exists()
-    if not exists:
+    if not Bucket(client, bucket).exists():
         create_bucket_class_location(bucket)
+    
+    tables = ["corpus_chains_2048_unique"]
     for table in tables:
         export_table(dataset, table, bucket)
     print(f'\n\nTo download bucket please run command below in terminal:\n\n\tgsutil -m cp -r gs://{bucket} .')
 
 if __name__ == "__main__":
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_KEYFILE_PATH
-    CLI(export_dataset)
+    dataset = sys.argv[2]
+    export_dataset(dataset)

@@ -5,7 +5,6 @@ from dataloader import get_ds
 
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import LambdaLR
 import warnings
 from tqdm import tqdm
 import os
@@ -42,7 +41,7 @@ def greedy_decode(model, source, source_input, source_mask, tokenizer_src, token
 
     return decoder_input.squeeze(0)
 
-def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_examples=2):
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_examples=10):
     model.eval()
     count = 0
 
@@ -72,8 +71,10 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
 
             source_text = batch["src_text"][0]
             target_text = batch["tgt_text"][0]
-            model_out_text = "".join(tokenizer_tgt.decode(model_out.detach().tolist()))
-            # model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+            model_ot = ""
+            for i in model_out.detach().tolist():
+                model_ot += tokenizer_tgt.decode([i])
+            model_out_text = model_ot
 
             source_texts.append(source_text)
             expected.append(target_text)
@@ -105,7 +106,7 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
 
     table = wandb.Table(columns=["input", "label", "predicted", "charwise_accuracy"])
     for inp, lab, pr, acc in zip(source_texts, expected, predicted, charwise_accs):
-        table.add_data(inp, pr, lab, acc)
+        table.add_data(inp, lab, pr, acc)
     wandb.log({"eval_samples": table})
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
@@ -188,6 +189,8 @@ def train_model(config):
 
         global_step += 1
         if global_step % config['val_epochs'] == 0:
+            # for srct_text, tgt_text in zip(batch['src_text'], batch['tgt_text']):
+            #     print(srct_text, tgt_text)
             run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, 100, device, lambda msg: batch_iterator.write(msg), global_step, wandb)
 
             # Save the model at the end of every epoch

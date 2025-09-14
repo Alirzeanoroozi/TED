@@ -10,8 +10,8 @@ from tqdm import tqdm
 import os
 os.makedirs("tokenizers", exist_ok=True)
 
-train_path = "../dlp/jsons/ted_train.json"
-validation_path = "../dlp/jsons/ted_validation.json"
+train_path = "../dlp/jsons/train.json"
+validation_path = "../dlp/jsons/validation.json"
 
 def get_all_sentences(ds, src_tgt):
     for item in ds:

@@ -1,5 +1,6 @@
 wandb/
-data/export_pqt_0_ted/
+data/export_pqt_0_ted_new/
+google-cloud-sdk/
 data/key.json
 dlp/jsons/
 esm/embeddings/

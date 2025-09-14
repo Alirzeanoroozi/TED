@@ -10,7 +10,7 @@ def create_label(chopping_star, cath_list):
         labels.append(f"{domain} | {cath}")
     return " * ".join(labels)
 
-def export_pq_to_jsonl(pq_path, jsonl_path, max_rows=1000000, batch_size=128, max_seq_len=500):
+def export_pq_to_jsonl(pq_path, jsonl_path, max_rows, batch_size, max_seq_len):
     if os.path.exists(jsonl_path):
         os.remove(jsonl_path)
     data_access = PQDataAccess(pq_path, batch_size=batch_size)
@@ -36,20 +36,20 @@ def export_pq_to_jsonl(pq_path, jsonl_path, max_rows=1000000, batch_size=128, ma
             break
 
 # Export train set
-export_pq_to_jsonl(
-    "data/export_pqt_0_ted/corpus_chains_sequence",
-    "dlp/jsons/ted_train.json",
-    max_rows=1000000,
-    batch_size=1024,
-    max_seq_len=2048
-)
+# export_pq_to_jsonl(
+#     "../data/export_pqt_0_ted_new/corpus_chains_2048_unique",
+#     "jsons/train.json",
+#     max_rows=1000000,
+#     batch_size=1024,
+#     max_seq_len=2048
+# )
 
 # Export validation set
 export_pq_to_jsonl(
-    "data/export_pqt_0_ted/validation",
-    "dlp/jsons/ted_validation.json",
-    max_rows=1000000,
-    batch_size=6,
+    "../data/export_pqt_0_ted_new/corpus_chains_2048_unique",
+    "jsons/validation.json",
+    max_rows=100,
+    batch_size=1024,
     max_seq_len=2048
 )
 
