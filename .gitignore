@@ -8,3 +8,4 @@ LoRA/qlora_checkpoints/
 LoRA/extended_tokenized_ds/
 LoRA/transformer_extended_tokenized_ds/
 *.pyc
+weights/
