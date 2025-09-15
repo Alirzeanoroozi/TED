@@ -20,7 +20,7 @@ import yaml
 import argparse
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--config", type=str, default="configs/ted_qlora_config_1.yaml")
+parser.add_argument("--config", type=str, default="../configs/config_1.yaml")
 args = parser.parse_args()
 
 config = yaml.safe_load(open(args.config, "r"))
@@ -84,13 +84,13 @@ else:
 
     def preprocess(examples):
         model_inputs = tokenizer(
-            examples["sequence"],
+            examples["Sequence"],
             max_length=2048,
             padding="max_length",
             truncation=True,
         )
         labels = tokenizer(
-            examples["spans"],
+            examples["label"],
             max_length=256,
             padding="max_length",
             truncation=True,

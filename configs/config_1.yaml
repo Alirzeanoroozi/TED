@@ -2,8 +2,8 @@
 model_name: "t5-3b"
 
 # Data Paths
-train_path: "dlp/extended_json_data/train.jsonl"
-validation_path: "dlp/extended_json_data/validation.jsonl"
+train_path: "../dlp/jsons/train.json"
+validation_path: "../dlp/jsons/validation.json"
 
 # CUDA Configuration
 cuda_visible_devices: "0,1"

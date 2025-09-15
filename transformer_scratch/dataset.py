@@ -2,9 +2,10 @@ import torch
 from torch.utils.data import Dataset
 
 class BilingualDataset(Dataset):
-    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len):
+    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, src_seq_len, tgt_seq_len):
         super().__init__()
-        self.seq_len = seq_len
+        self.src_seq_len = src_seq_len
+        self.tgt_seq_len = tgt_seq_len
 
         self.ds = ds
         self.tokenizer_src = tokenizer_src
@@ -29,9 +30,9 @@ class BilingualDataset(Dataset):
         dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids
 
         # Add sos, eos and padding to each sentence
-        enc_num_padding_tokens = self.seq_len - len(enc_input_tokens) - 2  # We will add <s> and </s>
+        enc_num_padding_tokens = self.src_seq_len - len(enc_input_tokens) - 2  # We will add <s> and </s>
         # We will only add <s>, and </s> only on the label
-        dec_num_padding_tokens = self.seq_len - len(dec_input_tokens) - 1
+        dec_num_padding_tokens = self.tgt_seq_len - len(dec_input_tokens) - 1
 
         # Make sure the number of padding tokens is not negative. If it is, the sentence is too long
         if enc_num_padding_tokens < 0 or dec_num_padding_tokens < 0:
@@ -69,16 +70,16 @@ class BilingualDataset(Dataset):
         )
 
         # Double check the size of the tensors to make sure they are all seq_len long
-        assert encoder_input.size(0) == self.seq_len
-        assert decoder_input.size(0) == self.seq_len
-        assert label.size(0) == self.seq_len
+        assert encoder_input.size(0) == self.src_seq_len
+        assert decoder_input.size(0) == self.tgt_seq_len
+        assert label.size(0) == self.tgt_seq_len
 
         return {
-            "encoder_input": encoder_input,  # (seq_len)
-            "decoder_input": decoder_input,  # (seq_len)
-            "encoder_mask": (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1, 1, seq_len)
-            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & causal_mask(decoder_input.size(0)), # (1, seq_len) & (1, seq_len, seq_len),
-            "label": label,  # (seq_len)
+            "encoder_input": encoder_input,  # (src_seq_len)
+            "decoder_input": decoder_input,  # (tgt_seq_len)
+            "encoder_mask": (encoder_input != self.pad_token).unsqueeze(0).unsqueeze(0).int(), # (1, 1, src_seq_len)
+            "decoder_mask": (decoder_input != self.pad_token).unsqueeze(0).int() & causal_mask(decoder_input.size(0)), # (1, tgt_seq_len) & (1, tgt_seq_len, tgt_seq_len),
+            "label": label,  # (tgt_seq_len)
             "src_text": src_text,
             "tgt_text": tgt_text,
         }
