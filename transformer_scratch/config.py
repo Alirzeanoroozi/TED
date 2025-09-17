@@ -4,7 +4,7 @@ def get_config():
     return {
         "batch_size": 32,
         "val_epochs": 200,
-        "lr": 10**-4,
+        "lr": 10**-5,
         "src_vocab_size": 25,
         "tgt_vocab_size": 20,
         "src_seq_len": 2048,
@@ -12,7 +12,7 @@ def get_config():
         "d_model": 960,
         "model_folder": "weights",
         "model_basename": "tmodel_",
-        "preload": None,
+        "preload": "latest",
     }
 
 def get_weights_file_path(config):

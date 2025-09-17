@@ -36,20 +36,20 @@ def export_pq_to_jsonl(pq_path, jsonl_path, max_rows, batch_size, max_seq_len):
             break
 
 # Export train set
-# export_pq_to_jsonl(
-#     "../data/export_pqt_0_ted_new/corpus_chains_2048_unique",
-#     "jsons/train.json",
-#     max_rows=1000000,
-#     batch_size=1024,
-#     max_seq_len=2048
-# )
-
-# Export validation set
 export_pq_to_jsonl(
     "../data/export_pqt_0_ted_new/corpus_chains_2048_unique",
-    "jsons/validation.json",
-    max_rows=100,
+    "jsons/train.json",
+    max_rows=2000000,
     batch_size=1024,
     max_seq_len=2048
 )
+
+# Export validation set
+# export_pq_to_jsonl(
+#     "../data/export_pqt_0_ted_new/corpus_chains_2048_unique",
+#     "jsons/validation.json",
+#     max_rows=100,
+#     batch_size=1024,
+#     max_seq_len=2048
+# )
 

@@ -112,7 +112,7 @@ def train_model(config):
     global_step = 0
     def lr_lambda(step):
         return max(0.1 ** (step // 5000), 1e-3)
-    scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=global_step-1)
+    # scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=global_step-1)
 
     # If the user specified a model to preload before training, load it
     model_filename = get_weights_file_path(config) if config['preload'] else None
@@ -120,9 +120,9 @@ def train_model(config):
         print(f'Preloading model {model_filename}')
         state = torch.load(model_filename)
         model.load_state_dict(state['model_state_dict'])
-        optimizer.load_state_dict(state['optimizer_state_dict'])
+        # optimizer.load_state_dict(state['optimizer_state_dict'])
         global_step = state['global_step']
-        scheduler.load_state_dict(state['scheduler_state_dict'])
+        # scheduler.load_state_dict(state['scheduler_state_dict'])
     else:
         print('No model to preload, starting from scratch')
 
@@ -150,7 +150,7 @@ def train_model(config):
         batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}"})
 
         # Log the loss
-        wandb.log({'train loss': loss.item(), 'global_step': global_step, 'learning_rate': scheduler.get_last_lr()[0]})
+        wandb.log({'train loss': loss.item(), 'global_step': global_step})
 
         # Backpropagate the loss
         loss.backward()
@@ -158,7 +158,7 @@ def train_model(config):
         # Update the weights
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
-        scheduler.step()
+        # scheduler.step()
 
         global_step += 1
         if global_step % config['val_epochs'] == 0:
@@ -170,8 +170,8 @@ def train_model(config):
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'global_step': global_step,
-                'scheduler_state_dict': scheduler.state_dict()
-            }, model_filename)
+                # 'scheduler_state_dict': scheduler.state_dict()
+            }, model_filename.split('.')[0] + "_new.pt")
 
 if __name__ == '__main__':
     warnings.filterwarnings("ignore")
