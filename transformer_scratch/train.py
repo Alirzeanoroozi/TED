@@ -46,7 +46,7 @@ def greedy_decode(model, source, source_mask, tokenizer_tgt, max_len, device):
 
     return decoder_input.squeeze(0)
 
-def run_validation(model, validation_ds, tokenizer_tgt, max_len, device, print_msg, num_examples=10):
+def run_validation(model, validation_ds, tokenizer_tgt, max_len, device, print_msg, num_examples=100):
     model.eval()
     count = 0
 
@@ -90,13 +90,17 @@ def run_validation(model, validation_ds, tokenizer_tgt, max_len, device, print_m
         exp = exp.ljust(max_len)
         correct = sum(p == e for p, e in zip(pred, exp))
         return correct / max_len
+    
+    def num_domains_acc(pred, exp):
+        return 1 if pred.count('*') == exp.count('*') else 0
 
     charwise_accs = [charwise_acc(p, e) for p, e in zip(predicted, expected)]
+    num_domains_accs = [num_domains_acc(p, e) for p, e in zip(predicted, expected)]
 
-    table = wandb.Table(columns=["input", "label", "predicted", "charwise_accuracy"])
-    for inp, lab, pr, acc in zip(source_texts, expected, predicted, charwise_accs):
-        table.add_data(inp, lab, pr, acc)
-    wandb.log({"eval_samples": table})
+    table = wandb.Table(columns=["input", "label", "predicted", "charwise_accuracy", "num_domains_accuracy"])
+    for inp, lab, pr, acc, num_domains in zip(source_texts, expected, predicted, charwise_accs, num_domains_accs):
+        table.add_data(inp, lab, pr, acc, num_domains)
+    wandb.log({"eval_samples": table, "num_domains_accuracy": sum(num_domains_accs) / len(num_domains_accs), "charwise_accuracy": sum(charwise_accs) / len(charwise_accs)})
 
 def train_model(config):
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
@@ -150,7 +154,7 @@ def train_model(config):
         batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}"})
 
         # Log the loss
-        wandb.log({'train loss': loss.item(), 'global_step': global_step})
+        wandb.log({'train loss': loss.item(), 'global_step': global_step, 'lr': optimizer.param_groups[0]['lr']})
 
         # Backpropagate the loss
         loss.backward()
@@ -171,7 +175,7 @@ def train_model(config):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'global_step': global_step,
                 # 'scheduler_state_dict': scheduler.state_dict()
-            }, model_filename.split('.')[0] + "_new.pt")
+            }, model_filename.split('.')[0] + ".pt")
 
 if __name__ == '__main__':
     warnings.filterwarnings("ignore")

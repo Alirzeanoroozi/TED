@@ -2,9 +2,9 @@ from pathlib import Path
 
 def get_config():
     return {
-        "batch_size": 32,
-        "val_epochs": 200,
-        "lr": 10**-5,
+        "batch_size": 16,
+        "val_epochs": 500,
+        "lr": 10**-4,
         "src_vocab_size": 25,
         "tgt_vocab_size": 20,
         "src_seq_len": 2048,
@@ -17,5 +17,5 @@ def get_config():
 
 def get_weights_file_path(config):
     model_folder = f"{config['model_folder']}"
-    model_filename = f"{config['model_basename']}_latest.pt"
+    model_filename = f"{config['model_basename']}_latest_new_new.pt"
     return str(Path('.') / model_folder / model_filename)
