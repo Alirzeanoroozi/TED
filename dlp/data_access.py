@@ -9,7 +9,6 @@ class PQDataAccess():
         with open (address + '_info.pkl', 'rb') as fp:
             self.files_info = pickle.load(fp)
             random.shuffle(self.files_info)
-            print(self.files_info)
         
         self.iterator = self.create_iterator()
           

@@ -3,6 +3,9 @@ from dataset import causal_mask
 from config import get_config, get_weights_file_path
 from dataloader import get_ds
 
+from parse_domains import parse_domains
+from iou import chain_iou
+
 import torch
 import torch.nn as nn
 import warnings
@@ -93,14 +96,58 @@ def run_validation(model, validation_ds, tokenizer_tgt, max_len, device, print_m
     
     def num_domains_acc(pred, exp):
         return 1 if pred.count('*') == exp.count('*') else 0
+    
+    def get_iou(predicted_chopped, actual_chopped):
+        try:
+            parsed_predicted_bounds, parsed_predicted_cath, parsed_actual_bounds, parsed_actual_cath = parse_domains(predicted_chopped, actual_chopped)
+        except ValueError as e:
+            return 0, 0, 0
+
+        def to_set(domains_boundries):
+            out_list = []
+            for domains in domains_boundries:
+                residue_indices = set()
+                for boundry in domains:
+                    start_end = boundry.split("-")
+                    start = start_end[0]
+                    end = start_end[1]
+                    residue_indices.update(range(int(start), int(end) + 1))
+                out_list.append(residue_indices)
+            return out_list
+        
+        predicted = to_set(parsed_predicted_bounds)
+        ground_truth = to_set(parsed_actual_bounds)
+        
+        correct_cath = 0
+        for predicted_cath_item, actual_cath_item in zip(parsed_predicted_cath, parsed_actual_cath):
+            if predicted_cath_item == actual_cath_item:
+                correct_cath += 1
+        correct_cath = correct_cath / len(parsed_predicted_cath)
+        
+        iou_chain, correct_prop = chain_iou(ground_truth, predicted)
+        return iou_chain, correct_prop, correct_cath
 
     charwise_accs = [charwise_acc(p, e) for p, e in zip(predicted, expected)]
     num_domains_accs = [num_domains_acc(p, e) for p, e in zip(predicted, expected)]
+    iou_chains = []
+    correct_props = []
+    correct_caths = []
 
-    table = wandb.Table(columns=["input", "label", "predicted", "charwise_accuracy", "num_domains_accuracy"])
+    table = wandb.Table(columns=["input", "length", "label", "predicted", "charwise_accuracy", "num_domains_accuracy", "iou_chain", "correct_prop", "correct_cath"])
     for inp, lab, pr, acc, num_domains in zip(source_texts, expected, predicted, charwise_accs, num_domains_accs):
-        table.add_data(inp, lab, pr, acc, num_domains)
-    wandb.log({"eval_samples": table, "num_domains_accuracy": sum(num_domains_accs) / len(num_domains_accs), "charwise_accuracy": sum(charwise_accs) / len(charwise_accs)})
+        iou_chain, correct_prop, correct_cath = get_iou(pr, lab)
+        iou_chains.append(iou_chain)
+        correct_props.append(correct_prop)
+        correct_caths.append(correct_cath)
+        table.add_data(inp, len(inp), lab, pr, acc, num_domains, iou_chain, correct_prop, correct_cath)
+    wandb.log({
+        "eval_samples": table,
+        "num_domains_accuracy": sum(num_domains_accs) / len(num_domains_accs),
+        "charwise_accuracy": sum(charwise_accs) / len(charwise_accs),
+        "iou_chain": sum(iou_chains) / len(iou_chains),
+        "correct_prop": sum(correct_props) / len(correct_props),
+        "correct_cath": sum(correct_caths) / len(correct_caths)
+    })
 
 def train_model(config):
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
@@ -124,7 +171,7 @@ def train_model(config):
         print(f'Preloading model {model_filename}')
         state = torch.load(model_filename)
         model.load_state_dict(state['model_state_dict'])
-        # optimizer.load_state_dict(state['optimizer_state_dict'])
+        optimizer.load_state_dict(state['optimizer_state_dict'])
         global_step = state['global_step']
         # scheduler.load_state_dict(state['scheduler_state_dict'])
     else:
