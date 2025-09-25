@@ -135,10 +135,18 @@ def run_validation(model, validation_ds, tokenizer_tgt, max_len, device, print_m
 
     table = wandb.Table(columns=["input", "length", "label", "predicted", "charwise_accuracy", "num_domains_accuracy", "iou_chain", "correct_prop", "correct_cath"])
     for inp, lab, pr, acc, num_domains in zip(source_texts, expected, predicted, charwise_accs, num_domains_accs):
-        iou_chain, correct_prop, correct_cath = get_iou(pr, lab)
-        iou_chains.append(iou_chain)
-        correct_props.append(correct_prop)
-        correct_caths.append(correct_cath)
+        try:
+            iou_chain, correct_prop, correct_cath = get_iou(pr, lab)
+            iou_chains.append(iou_chain)
+            correct_props.append(correct_prop)
+            correct_caths.append(correct_cath)
+        except Exception:
+            iou_chain = 0
+            correct_prop = 0
+            correct_cath = 0
+            iou_chains.append(iou_chain)
+            correct_props.append(correct_prop)
+            correct_caths.append(correct_cath)
         table.add_data(inp, len(inp), lab, pr, acc, num_domains, iou_chain, correct_prop, correct_cath)
     wandb.log({
         "eval_samples": table,
