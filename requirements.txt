@@ -1,5 +1,12 @@
+# lora
 datasets>=2.12.0
 peft>=0.4.0
 bitsandbytes>=0.42.0
 accelerate>=0.20.0
 tokenizers>=0.13.0
+
+# torch
+torch>=2.0.0
+pandas>=1.5.0
+wandb>=0.15.0
+pydantic>=2.7.4

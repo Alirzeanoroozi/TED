@@ -1,4 +1,0 @@
-torch>=2.0.0
-pandas>=1.5.0
-wandb>=0.15.0
-pydantic>=2.7.4
