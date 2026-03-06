@@ -17,29 +17,31 @@ domain boundaries comes from either the target or the prediction, whichever is h
 this way over-prediction is penalized.
 
 """
+
+from __future__ import annotations
+
 import numpy as np
 
 
 def pred_domains_to_bounds(pred_domains, optimize_for_linkers=False):
-    """
-    Converts domain dictionary to list of boundary residues
-    """
+    """Converts a domain dictionary to list of boundary residues."""
+
     pred_bounds = np.array([])
     for name, res in pred_domains.items():
-        if name=='linker' or len(res) ==0:
+        if name == "linker" or len(res) == 0:
             continue
         res = np.array(sorted(set(res)))
-        gaps  = res[1:] - res[:-1]
+        gaps = res[1:] - res[:-1]
         if any(gaps > 1):
             gaps_start_indexes = np.where(gaps > 1)[0]
             pred_bounds = np.append(pred_bounds, res[gaps_start_indexes] + 1)
             pred_bounds = np.append(pred_bounds, res[gaps_start_indexes + 1])
-        pred_bounds = np.append(pred_bounds, [res[0], res[-1] +1])
+        pred_bounds = np.append(pred_bounds, [res[0], res[-1] + 1])
     if optimize_for_linkers:
         # given that linkers all count as boundaries probs possible
         # to score more points by predicting boundaries in the middle of linker
         # regions rather than the edges
-        raise NotImplementedError # todo
+        raise NotImplementedError  # todo
     return np.array(sorted(list(set(pred_bounds.astype(int)))))
 
 
@@ -51,38 +53,42 @@ def get_true_boundary_res(domain_dict):
     is applied to the true boundaries but not the
     predicted boundaries.
     """
+
     bounds = pred_domains_to_bounds(domain_dict)
-    # c.f. get_boundary_res below
     boundaries = {
         "boundary_res": list(bounds),
-        "n_boundaries": len(list(bounds))
+        "n_boundaries": len(list(bounds)),
     }
-    boundaries["boundary_res"] += list(domain_dict["linker"])
+    boundaries["boundary_res"] += list(domain_dict.get("linker", []))
     return boundaries
 
 
 def boundary_distance_score(domains, boundaries):
     pred_bounds = pred_domains_to_bounds(domains)
     # distance score as specified in CASP7 paper {distance_to_true_bound:score}
-    dist_to_score = {0:8, 1:7, 2:6, 3:5, 4:4, 5:3, 6:2, 7:1} 
-    score = 0
-    # the final score is divided by the number of segments and the maximum score for each boundary
-    normalizing_term = 8 * max(len(pred_bounds), boundaries['n_boundaries'])
+    dist_to_score = {0: 8, 1: 7, 2: 6, 3: 5, 4: 4, 5: 3, 6: 2, 7: 1}
+    normalizing_term = 8 * max(len(pred_bounds), boundaries["n_boundaries"])
+    if normalizing_term == 0:
+        return 0.0
+
     scores = []
     for b in pred_bounds:
-        distance = min(abs(boundaries['boundary_res'] - b))
+        distance = min(abs(boundaries["boundary_res"] - b))
         if distance < 8:
             scores.append(dist_to_score[distance])
-    # JW adjustment: additional boundaries that can't be mapped to a real bound 
+
+    # JW adjustment: additional boundaries that can't be mapped to a real bound
     # should not be added to the un-normalized score
-    score = sum(sorted(scores)[-boundaries['n_boundaries']:])
+    score = sum(sorted(scores)[-boundaries["n_boundaries"] :])
     return score / normalizing_term
+
 
 if __name__ == "__main__":
     domains = {
         "domain1": [1, 2, 3],
         "domain2": [4, 5, 6],
         "domain3": [7, 8, 9],
+        "linker": [0],
     }
     boundaries = get_true_boundary_res(domains)
     print(boundaries)

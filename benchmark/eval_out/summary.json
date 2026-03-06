@@ -1,0 +1,80 @@
+{
+  "n_targets": 100,
+  "groups": [
+    {
+      "group": "overall",
+      "n": 100,
+      "gt_parse_ok_rate": 1.0,
+      "pred_parse_ok_rate": 0.98,
+      "domain_count_match_rate": 0.82,
+      "mean_iou_chain": 0.6156856747111403,
+      "median_iou_chain": 0.6716443887496519,
+      "mean_correct_prop": 0.345,
+      "median_correct_prop": 0.0,
+      "mean_correct_cath_prop": 0.4158333333333333,
+      "median_correct_cath_prop": 0.125,
+      "mean_ndo": 0.4711967130045324,
+      "median_ndo": 0.6330263881253436,
+      "mean_boundary_distance_score": 0.4941647727272727,
+      "median_boundary_distance_score": 0.5
+    },
+    {
+      "group": "gt_zero",
+      "n": 0,
+      "gt_parse_ok_rate": null,
+      "pred_parse_ok_rate": null,
+      "domain_count_match_rate": null,
+      "mean_iou_chain": null,
+      "median_iou_chain": null,
+      "mean_correct_prop": null,
+      "median_correct_prop": null,
+      "mean_correct_cath_prop": null,
+      "median_correct_cath_prop": null,
+      "mean_ndo": null,
+      "median_ndo": null,
+      "mean_boundary_distance_score": null,
+      "median_boundary_distance_score": null
+    },
+    {
+      "group": "gt_single",
+      "n": 70,
+      "gt_parse_ok_rate": 1.0,
+      "pred_parse_ok_rate": 0.9857142857142858,
+      "domain_count_match_rate": 0.8714285714285714,
+      "mean_iou_chain": 0.6907715176901005,
+      "median_iou_chain": 0.7838367346938775,
+      "mean_correct_prop": 0.44285714285714284,
+      "median_correct_prop": 0.0,
+      "mean_correct_cath_prop": 0.4642857142857143,
+      "median_correct_cath_prop": 0.0,
+      "mean_ndo": 0.5266534601415253,
+      "median_ndo": 0.7164371320437342,
+      "mean_boundary_distance_score": 0.5805059523809524,
+      "median_boundary_distance_score": 0.5
+    },
+    {
+      "group": "gt_multi",
+      "n": 30,
+      "gt_parse_ok_rate": 1.0,
+      "pred_parse_ok_rate": 0.9666666666666667,
+      "domain_count_match_rate": 0.7,
+      "mean_iou_chain": 0.4404853744268997,
+      "median_iou_chain": 0.3854792876989139,
+      "mean_correct_prop": 0.11666666666666667,
+      "median_correct_prop": 0.0,
+      "mean_correct_cath_prop": 0.30277777777777776,
+      "median_correct_cath_prop": 0.29166666666666663,
+      "mean_ndo": 0.3417976363515489,
+      "median_ndo": 0.37003944506312253,
+      "mean_boundary_distance_score": 0.2927020202020202,
+      "median_boundary_distance_score": 0.25
+    }
+  ],
+  "config": {
+    "iou_threshold": 0.8,
+    "boundary_tolerance": 20,
+    "input_indexing": "one_based_inclusive",
+    "include_deepdom_boundary_metrics": false
+  },
+  "input": "benchmark/results_iou.csv"
+}

@@ -1,11 +1,5 @@
-wandb/
-data/export_pqt_0_ted_new/
-google-cloud-sdk/
-data/key.json
-dlp/jsons/
-esm/embeddings/
-LoRA/qlora_checkpoints/
-LoRA/extended_tokenized_ds/
-LoRA/transformer_extended_tokenized_ds/
 *.pyc
-weights/
+data/
+.env
+transformer_checkpoint.pt
+.DS_Store
