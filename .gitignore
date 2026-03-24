@@ -1,7 +1,8 @@
 *.pyc
+.DS_Store
+logs/
+
 data/*
 !data/chains.ted.csv
 
-.env
 transformer_checkpoint.pt
-.DS_Store
