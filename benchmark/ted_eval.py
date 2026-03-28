@@ -27,7 +27,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-try:  # package import path
+if __package__:
     from .domain_boundry_dist import (
         boundary_distance_score,
         get_true_boundary_res,
@@ -35,7 +35,7 @@ try:  # package import path
     )
     from .ndo import ndo_score
     from .utils import convert_domain_dict_strings
-except ImportError:  # direct script path
+else:  # direct script path
     from domain_boundry_dist import boundary_distance_score, get_true_boundary_res, pred_domains_to_bounds
     from ndo import ndo_score
     from utils import convert_domain_dict_strings

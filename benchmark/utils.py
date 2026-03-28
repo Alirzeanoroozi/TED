@@ -9,8 +9,13 @@ from itertools import product
 import numpy as np
 
 import warnings
-from Bio.PDB.PDBExceptions import PDBConstructionWarning
-warnings.simplefilter('ignore', PDBConstructionWarning)
+
+try:
+    from Bio.PDB.PDBExceptions import PDBConstructionWarning
+except ModuleNotFoundError:
+    PDBConstructionWarning = None
+else:
+    warnings.simplefilter("ignore", PDBConstructionWarning)
 
 LOG = logging.getLogger(__name__)
 

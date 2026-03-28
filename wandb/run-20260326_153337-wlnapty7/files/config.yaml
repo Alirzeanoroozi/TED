@@ -1,0 +1,178 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            9mz3jfwvg75xacv3ldr7i6frtfw26v22:
+                args:
+                    - --data_parquet_folder
+                    - /scratch/esevinc22/TED/TED/data/all_parquet
+                    - --save_dir
+                    - /scratch/esevinc22/TED/TED/lightning_logs
+                    - --save_path
+                    - /scratch/esevinc22/TED/TED/artifacts/transformer_checkpoint.pt
+                    - --accelerator
+                    - gpu
+                    - --strategy
+                    - auto
+                    - --num_workers
+                    - "4"
+                    - --benchmark_eval_steps
+                    - "1000"
+                    - --benchmark_eval_subset_size
+                    - "100"
+                codePath: src/train_lightning.py
+                codePathLocal: src/train_lightning.py
+                cpu_count: 128
+                cpu_count_logical: 128
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "933378551808"
+                        used: "10897108992"
+                email: esevinc22@ku.edu.tr
+                executable: /home/esevinc22/.conda/envs/ted/bin/python
+                gpu: NVIDIA A100-SXM4-40GB
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Ampere
+                      cudaCores: 6912
+                      memoryTotal: "42949672960"
+                      name: NVIDIA A100-SXM4-40GB
+                      uuid: GPU-99ea2df9-b90b-9991-9e0a-1e0a97dd5dad
+                host: rk02.kuvalar.ku.edu.tr
+                memory:
+                    total: "540315484160"
+                os: Linux-4.18.0-513.24.1.el8_9.x86_64-x86_64-with-glibc2.28
+                program: /scratch/esevinc22/TED/TED/src/train_lightning.py
+                python: CPython 3.10.20
+                root: .
+                slurm:
+                    cluster_name: valar
+                    conf: /etc/slurm/slurm.conf
+                    cpus_on_node: "11"
+                    cpus_per_task: "11"
+                    gpus_on_node: "1"
+                    gtids: "0"
+                    job_account: kutem
+                    job_cpus_per_node: "11"
+                    job_end_time: "1774614750"
+                    job_gid: "1810810000"
+                    job_gpus: "6"
+                    job_id: "846230"
+                    job_name: ted_lightning_train
+                    job_nodelist: rk02
+                    job_num_nodes: "1"
+                    job_partition: kutem_gpu
+                    job_qos: kutem
+                    job_start_time: "1774528350"
+                    job_uid: "1160783"
+                    job_user: esevinc22
+                    jobid: "846230"
+                    localid: "0"
+                    mem_per_node: "40960"
+                    nnodes: "1"
+                    nodeid: "0"
+                    nodelist: rk02
+                    nprocs: "1"
+                    ntasks: "1"
+                    oom_kill_step: "0"
+                    prio_process: "0"
+                    procid: "0"
+                    submit_dir: /scratch/esevinc22/TED/TED
+                    submit_host: login01.kuvalar.ku.edu.tr
+                    task_pid: "461985"
+                    tasks_per_node: "1"
+                    topology_addr: rk02
+                    topology_addr_pattern: node
+                    tres_per_task: cpu=11
+                startedAt: "2026-03-26T12:33:37.206525Z"
+                writerId: 9mz3jfwvg75xacv3ldr7i6frtfw26v22
+        m:
+            - "1": trainer/global_step
+              "6":
+                - 3
+              "7": []
+            - "2": '*'
+              "5": 1
+              "6":
+                - 1
+              "7": []
+        python_version: 3.10.20
+        t:
+            "1":
+                - 1
+                - 9
+                - 11
+                - 49
+                - 71
+                - 100
+                - 103
+            "2":
+                - 1
+                - 9
+                - 11
+                - 49
+                - 71
+                - 100
+                - 103
+            "3":
+                - 2
+                - 7
+                - 13
+                - 16
+                - 66
+            "4": 3.10.20
+            "5": 0.25.1
+            "6": 5.3.0
+            "12": 0.25.1
+            "13": linux-x86_64
+accelerator:
+    value: gpu
+batch_size:
+    value: 8
+benchmark_eval_random_subset:
+    value: false
+benchmark_eval_seed:
+    value: 42
+benchmark_eval_steps:
+    value: 1000
+benchmark_eval_subset_size:
+    value: 100
+d_model:
+    value: 256
+data_parquet_folder:
+    value: /scratch/esevinc22/TED/TED/data/all_parquet
+dim_feedforward:
+    value: 1024
+dropout:
+    value: 0.1
+epochs:
+    value: 10
+lr:
+    value: 0.0001
+max_grad_norm:
+    value: 1
+max_src_len:
+    value: 1024
+max_tgt_len:
+    value: 128
+nhead:
+    value: 8
+num_decoder_layers:
+    value: 4
+num_encoder_layers:
+    value: 4
+num_workers:
+    value: 4
+save_dir:
+    value: /scratch/esevinc22/TED/TED/lightning_logs
+save_path:
+    value: /scratch/esevinc22/TED/TED/artifacts/transformer_checkpoint.pt
+src_vocab_size:
+    value: 24
+strategy:
+    value: auto
+tgt_vocab_size:
+    value: 20
+weight_decay:
+    value: 0.01

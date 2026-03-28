@@ -4,6 +4,11 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import pandas as pd
 
+try:
+    import polars as pl
+except ImportError:  # pragma: no cover - optional dependency
+    pl = None
+
 
 def _normalize_target_column(df):
     """Use 'chopping_star' as target; parquet may use 'label'."""
@@ -16,7 +21,15 @@ def _load_file(path):
     """Load a single file as DataFrame (parquet or csv)."""
     path = str(path)
     if path.lower().endswith(".parquet"):
-        df = pd.read_parquet(path)
+        try:
+            df = pd.read_parquet(path)
+        except ImportError as exc:
+            if pl is None:
+                raise ImportError(
+                    "Reading parquet requires pandas parquet support (pyarrow/fastparquet) "
+                    "or an installed polars fallback."
+                ) from exc
+            df = pd.DataFrame(pl.read_parquet(path).to_dicts())
     else:
         df = pd.read_csv(path, encoding="utf-8", on_bad_lines="skip")
     return _normalize_target_column(df)
@@ -73,6 +86,8 @@ class SequenceToChoppingDataset(Dataset):
             "tgt_out": tgt_out,
             "src_len": src.size(0),
             "tgt_len": tgt_out.size(0),
+            "src_text": src_text,
+            "tgt_text": tgt_text,
         }
 
 
@@ -88,7 +103,17 @@ def collate_fn(batch, pad_id_src, pad_id_tgt):
     )
     src_len = torch.tensor([b["src_len"] for b in batch], dtype=torch.long)
     tgt_len = torch.tensor([b["tgt_len"] for b in batch], dtype=torch.long)
-    return {"src": src, "tgt_in": tgt_in, "tgt_out": tgt_out, "src_len": src_len, "tgt_len": tgt_len}
+    src_text = [b["src_text"] for b in batch]
+    tgt_text = [b["tgt_text"] for b in batch]
+    return {
+        "src": src,
+        "tgt_in": tgt_in,
+        "tgt_out": tgt_out,
+        "src_len": src_len,
+        "tgt_len": tgt_len,
+        "src_text": src_text,
+        "tgt_text": tgt_text,
+    }
 
 
 def create_train_val_datasets(

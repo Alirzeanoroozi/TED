@@ -6,17 +6,28 @@ Example on the cluster from /scratch/erkmenerken22/TED:
   python src/data/augment_parquet.py --in_dir data/parquet_sequences --out_dir data/parquet_augmented --n_aug_per_chain 5 --seed 42
 """
 
-from __future__ import annotations
-
 import argparse
 import random
 import re
 import time
 from bisect import bisect_left, bisect_right
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError as exc:
+    raise SystemExit(
+        "augment_parquet.py requires pandas. "
+        "Activate the TED environment first, for example: "
+        "source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh && "
+        "conda activate gmconda_py3923"
+    ) from exc
+
+try:
+    import polars as pl
+except ImportError:  # pragma: no cover - optional dependency
+    pl = None
 
 DOMAIN_SPLIT_RE = re.compile(r"\s*\*\s*")
 SEGMENT_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
@@ -32,7 +43,7 @@ def detect_repo_root() -> Path:
     raise RuntimeError("Could not detect the TED repo root from src/data/augment_parquet.py")
 
 
-def resolve_path(raw_path: str | Path, repo_root: Path) -> Path:
+def resolve_path(raw_path: Union[str, Path], repo_root: Path) -> Path:
     path = Path(raw_path).expanduser()
     if path.is_absolute():
         return path.resolve()
@@ -42,24 +53,55 @@ def resolve_path(raw_path: str | Path, repo_root: Path) -> Path:
 def detect_input_dir(repo_root: Path) -> Path:
     preferred_dirs = [repo_root / "data" / "parquet_sequences", repo_root / "data" / "parquet_base"]
     for path in preferred_dirs:
-        if path.is_dir() and any(path.glob("*.parquet")):
+        if path.is_dir():
             return path
 
     parquet_files = sorted((repo_root / "data").rglob("*.parquet"))
-    if not parquet_files:
-        raise FileNotFoundError(f"No parquet shards were found under {repo_root / 'data'}")
-    return parquet_files[0].parent
+    if parquet_files:
+        return parquet_files[0].parent
+    return preferred_dirs[0]
 
 
-def list_parquet_files(in_dir: Path) -> list[Path]:
+def list_parquet_files(in_dir: Path) -> List[Path]:
     if in_dir.is_file():
         if in_dir.suffix.lower() != ".parquet":
             raise ValueError(f"Input file is not parquet: {in_dir}")
         return [in_dir]
-    parquet_files = sorted(in_dir.glob("*.parquet"))
+    if not in_dir.exists():
+        raise FileNotFoundError(f"Input directory does not exist: {in_dir}")
+    if not in_dir.is_dir():
+        raise ValueError(f"Input path is neither a parquet file nor a directory: {in_dir}")
+    parquet_files = sorted(in_dir.rglob("*.parquet"))
     if not parquet_files:
-        raise FileNotFoundError(f"No parquet files were found in {in_dir}")
+        raise FileNotFoundError(
+            f"No parquet files were found in {in_dir}. "
+            "Expected base shards under data/parquet_sequences or pass --in_dir explicitly."
+        )
     return parquet_files
+
+
+def read_parquet_frame(parquet_file: Path) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(parquet_file)
+    except ImportError as exc:
+        if pl is None:
+            raise ImportError(
+                "Reading parquet requires pandas parquet support (pyarrow/fastparquet) "
+                "or an installed polars fallback."
+            ) from exc
+        return pd.DataFrame(pl.read_parquet(parquet_file).to_dicts())
+
+
+def write_parquet_frame(df: pd.DataFrame, out_path: Path) -> None:
+    try:
+        df.to_parquet(out_path, index=False)
+    except ImportError as exc:
+        if pl is None:
+            raise ImportError(
+                "Writing parquet requires pandas parquet support (pyarrow/fastparquet) "
+                "or an installed polars fallback."
+            ) from exc
+        pl.DataFrame(df.to_dict(orient="records")).write_parquet(str(out_path))
 
 
 def detect_target_column(columns: Iterable[str]) -> str:
@@ -71,7 +113,7 @@ def detect_target_column(columns: Iterable[str]) -> str:
     raise ValueError("Expected a domain annotation column named 'chopping_star' or 'label'.")
 
 
-def split_domain_tokens(chopping_star: object) -> list[str]:
+def split_domain_tokens(chopping_star: object) -> List[str]:
     if chopping_star is None or pd.isna(chopping_star):
         return []
     text = str(chopping_star).strip()
@@ -80,10 +122,10 @@ def split_domain_tokens(chopping_star: object) -> list[str]:
     return [token.strip() for token in DOMAIN_SPLIT_RE.split(text) if token.strip()]
 
 
-def infer_index_base(parquet_files: list[Path], dry_limit_rows: int = 200) -> int:
-    starts: list[int] = []
+def infer_index_base(parquet_files: List[Path], dry_limit_rows: int = 200) -> int:
+    starts: List[int] = []
     for parquet_file in parquet_files[:5]:
-        df = pd.read_parquet(parquet_file)
+        df = read_parquet_frame(parquet_file)
         target_column = detect_target_column(df.columns)
         for value in df[target_column].head(dry_limit_rows).tolist():
             for token in split_domain_tokens(value):
@@ -106,14 +148,14 @@ def infer_index_base(parquet_files: list[Path], dry_limit_rows: int = 200) -> in
     return 1
 
 
-def parse_annotation(annotation: object, index_base: int) -> list[dict[str, object]]:
-    domains: list[dict[str, object]] = []
+def parse_annotation(annotation: object, index_base: int) -> List[Dict[str, object]]:
+    domains: List[Dict[str, object]] = []
     for token in split_domain_tokens(annotation):
         if "|" not in token:
             raise ValueError(f"Domain token is missing '|': {token}")
         left, right = token.split("|", 1)
         cath_label = right.strip()
-        segments: list[tuple[int, int]] = []
+        segments: List[Tuple[int, int]] = []
         for segment_text in [seg.strip() for seg in left.strip().split("_") if seg.strip()]:
             match = SEGMENT_RE.match(segment_text)
             if not match:
@@ -139,8 +181,8 @@ def parse_annotation(annotation: object, index_base: int) -> list[dict[str, obje
     return domains
 
 
-def serialize_domains(domains: list[dict[str, object]], index_base: int) -> str:
-    tokens: list[str] = []
+def serialize_domains(domains: List[Dict[str, object]], index_base: int) -> str:
+    tokens: List[str] = []
     for domain in domains:
         segment_tokens = []
         for start, end in domain["segments"]:
@@ -151,7 +193,7 @@ def serialize_domains(domains: list[dict[str, object]], index_base: int) -> str:
     return " * ".join(tokens)
 
 
-def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
     if not intervals:
         return []
     intervals = sorted(intervals)
@@ -165,10 +207,10 @@ def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def compute_valid_cut_points(seq_len: int, domains: list[dict[str, object]]) -> list[int]:
+def compute_valid_cut_points(seq_len: int, domains: List[Dict[str, object]]) -> List[int]:
     # Protect the whole domain envelope so we never cut between segments of the same domain.
     protected = merge_intervals([(int(domain["start"]), int(domain["end"])) for domain in domains])
-    valid_points: list[int] = []
+    valid_points: List[int] = []
     interval_idx = 0
     for point in range(seq_len + 1):
         while interval_idx < len(protected) and point >= protected[interval_idx][1]:
@@ -182,15 +224,15 @@ def compute_valid_cut_points(seq_len: int, domains: list[dict[str, object]]) -> 
 
 
 def collect_random_windows(
-    valid_points: list[int],
+    valid_points: List[int],
     seq_len: int,
     min_len: int,
-    max_len: int | None,
+    max_len: Optional[int],
     n_windows: int,
     rng: random.Random,
-) -> list[tuple[int, int]]:
-    windows: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
+) -> List[Tuple[int, int]]:
+    windows: List[Tuple[int, int]] = []
+    seen: Set[Tuple[int, int]] = set()
     max_right_limit = seq_len if max_len is None else min(seq_len, max_len)
     if len(valid_points) < 2:
         return windows
@@ -216,7 +258,7 @@ def collect_random_windows(
     return windows
 
 
-def evenly_spaced_indices(size: int, count: int) -> list[int]:
+def evenly_spaced_indices(size: int, count: int) -> List[int]:
     if size <= 0 or count <= 0:
         return []
     if count >= size:
@@ -232,14 +274,14 @@ def evenly_spaced_indices(size: int, count: int) -> list[int]:
 
 
 def collect_systematic_windows(
-    valid_points: list[int],
+    valid_points: List[int],
     seq_len: int,
     min_len: int,
-    max_len: int | None,
+    max_len: Optional[int],
     n_windows: int,
-) -> list[tuple[int, int]]:
-    windows: list[tuple[int, int]] = []
-    seen: set[tuple[int, int]] = set()
+) -> List[Tuple[int, int]]:
+    windows: List[Tuple[int, int]] = []
+    seen: Set[Tuple[int, int]] = set()
     max_right_limit = seq_len if max_len is None else min(seq_len, max_len)
     left_indices = evenly_spaced_indices(max(len(valid_points) - 1, 0), max(n_windows * 3, 1))
 
@@ -284,25 +326,25 @@ def collect_systematic_windows(
 
 
 def select_windows(
-    valid_points: list[int],
+    valid_points: List[int],
     seq_len: int,
     min_len: int,
-    max_len: int | None,
+    max_len: Optional[int],
     n_windows: int,
     strategy: str,
     rng: random.Random,
-) -> list[tuple[int, int]]:
+) -> List[Tuple[int, int]]:
     if strategy == "random":
         return collect_random_windows(valid_points, seq_len, min_len, max_len, n_windows, rng)
     return collect_systematic_windows(valid_points, seq_len, min_len, max_len, n_windows)
 
 
 def crop_domains(
-    domains: list[dict[str, object]],
+    domains: List[Dict[str, object]],
     left_cut: int,
     right_cut: int,
-) -> tuple[list[dict[str, object]], int, int]:
-    kept_domains: list[dict[str, object]] = []
+) -> Tuple[List[Dict[str, object]], int, int]:
+    kept_domains: List[Dict[str, object]] = []
     kept_count = 0
     dropped_partial = 0
 
@@ -322,14 +364,14 @@ def crop_domains(
     return kept_domains, kept_count, dropped_partial
 
 
-def validate_window(left_cut: int, right_cut: int, valid_points: set[int]) -> None:
+def validate_window(left_cut: int, right_cut: int, valid_points: Set[int]) -> None:
     if left_cut >= right_cut:
         raise ValueError(f"Invalid crop window: left_cut={left_cut}, right_cut={right_cut}")
     if left_cut not in valid_points or right_cut not in valid_points:
         raise ValueError(f"Crop boundary is not a valid cut point: ({left_cut}, {right_cut})")
 
 
-def build_original_row(row: dict[str, object], target_column: str) -> dict[str, object]:
+def build_original_row(row: Dict[str, object], target_column: str) -> Dict[str, object]:
     output = dict(row)
     annotation = str(output.get(target_column, ""))
     output["label"] = annotation
@@ -342,14 +384,14 @@ def build_original_row(row: dict[str, object], target_column: str) -> dict[str, 
 
 
 def build_augmented_row(
-    row: dict[str, object],
+    row: Dict[str, object],
     row_key: str,
     augmented_id: int,
     cropped_seq: str,
     updated_annotation: str,
     left_cut: int,
     right_cut: int,
-) -> dict[str, object]:
+) -> Dict[str, object]:
     output = dict(row)
     original_id = str(output.get("uniprot_id", row_key))
     output["sequence"] = cropped_seq
@@ -364,13 +406,13 @@ def build_augmented_row(
     return output
 
 
-def row_key_from(row: dict[str, object], shard_name: str, row_index: int) -> str:
+def row_key_from(row: Dict[str, object], shard_name: str, row_index: int) -> str:
     if "uniprot_id" in row and pd.notna(row["uniprot_id"]):
         return str(row["uniprot_id"])
     return f"{shard_name}:{row_index}"
 
 
-def iter_output_chunks(rows: list[dict[str, object]], shard_size: int | None) -> Iterable[list[dict[str, object]]]:
+def iter_output_chunks(rows: List[Dict[str, object]], shard_size: Optional[int]) -> Iterable[List[Dict[str, object]]]:
     if shard_size is None or shard_size <= 0:
         yield rows
         return
@@ -379,36 +421,36 @@ def iter_output_chunks(rows: list[dict[str, object]], shard_size: int | None) ->
 
 
 def write_output_shards(
-    output_rows: list[dict[str, object]],
+    output_rows: List[Dict[str, object]],
     out_dir: Path,
     input_stem: str,
-    shard_size: int | None,
-) -> list[Path]:
-    written_paths: list[Path] = []
+    shard_size: Optional[int],
+) -> List[Path]:
+    written_paths: List[Path] = []
     for chunk_index, chunk_rows in enumerate(iter_output_chunks(output_rows, shard_size), start=1):
         if not chunk_rows:
             continue
         suffix = "" if shard_size is None else f"_{chunk_index:05d}"
         out_path = out_dir / f"{input_stem}_augmented{suffix}.parquet"
-        pd.DataFrame(chunk_rows).to_parquet(out_path, index=False)
+        write_parquet_frame(pd.DataFrame(chunk_rows), out_path)
         written_paths.append(out_path)
     return written_paths
 
 
 def process_row(
-    row: dict[str, object],
+    row: Dict[str, object],
     target_column: str,
     index_base: int,
     n_aug_per_chain: int,
     min_len: int,
-    max_len: int | None,
+    max_len: Optional[int],
     strategy: str,
     allow_no_domains: bool,
     include_original: bool,
     row_seed: int,
     shard_name: str,
     row_index: int,
-) -> tuple[list[dict[str, object]], dict[str, int], list[str]]:
+) -> Tuple[List[Dict[str, object]], Dict[str, int], List[str]]:
     stats = {
         "augmented_rows": 0,
         "kept_domains": 0,
@@ -417,8 +459,8 @@ def process_row(
         "parse_errors": 0,
         "candidate_windows": 0,
     }
-    warnings: list[str] = []
-    output_rows: list[dict[str, object]] = []
+    warnings: List[str] = []
+    output_rows: List[Dict[str, object]] = []
 
     sequence = str(row.get("sequence", "") or "")
     annotation = row.get(target_column, "")
@@ -490,20 +532,20 @@ def process_parquet_shard(
     seed: int,
     n_aug_per_chain: int,
     min_len: int,
-    max_len: int | None,
+    max_len: Optional[int],
     strategy: str,
     include_original: bool,
     allow_no_domains: bool,
-    shard_size: int | None,
+    shard_size: Optional[int],
     progress_every: int,
-    global_counts: dict[str, int],
+    global_counts: Dict[str, int],
     start_time: float,
-) -> list[Path]:
-    df = pd.read_parquet(parquet_file)
+) -> List[Path]:
+    df = read_parquet_frame(parquet_file)
     target_column = detect_target_column(df.columns)
     records = df.to_dict(orient="records")
-    output_rows: list[dict[str, object]] = []
-    shard_warnings: list[str] = []
+    output_rows: List[Dict[str, object]] = []
+    shard_warnings: List[str] = []
 
     for row_index, row in enumerate(records, start=1):
         row_seed = seed + global_counts["rows_processed"]
@@ -552,19 +594,19 @@ def process_parquet_shard(
 
 
 def run_dry_run(
-    parquet_files: list[Path],
+    parquet_files: List[Path],
     index_base: int,
     seed: int,
     n_aug_per_chain: int,
     min_len: int,
-    max_len: int | None,
+    max_len: Optional[int],
     strategy: str,
     include_original: bool,
     allow_no_domains: bool,
 ) -> None:
     shown = 0
     for parquet_file in parquet_files:
-        df = pd.read_parquet(parquet_file)
+        df = read_parquet_frame(parquet_file)
         target_column = detect_target_column(df.columns)
         for row_index, row in enumerate(df.to_dict(orient="records"), start=1):
             row_output_rows, row_stats, row_warnings = process_row(
@@ -610,8 +652,8 @@ def build_arg_parser(repo_root: Path, detected_in_dir: Path) -> argparse.Argumen
     )
     parser.add_argument(
         "--out_dir",
-        default=str(repo_root / "data" / "parquet_augmented"),
-        help=f"Output directory for augmented parquet shards. Default: {repo_root / 'data' / 'parquet_augmented'}",
+        default=str(repo_root / "data" / "parquet_sequences_augmented"),
+        help=f"Output directory for augmented parquet shards. Default: {repo_root / 'data' / 'parquet_sequences_augmented'}",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for crop selection.")
     parser.add_argument("--n_aug_per_chain", type=int, default=3, help="Number of augmented crops to attempt per chain.")
@@ -678,7 +720,7 @@ def main() -> None:
         "parse_errors": 0,
     }
     start_time = time.time()
-    written_files: list[Path] = []
+    written_files: List[Path] = []
 
     for parquet_file in parquet_files:
         print(f"[INFO] processing_shard={parquet_file}")

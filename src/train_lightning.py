@@ -1,17 +1,56 @@
 import os
+import sys
 import argparse
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
 from dotenv import load_dotenv
 import wandb
 
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import Callback, ModelCheckpoint
+from pytorch_lightning.utilities.rank_zero import rank_zero_info
 
 from data.dataset_ import collate_fn, create_train_val_test_datasets, _load_paths
 from tokenizer_ import TextTokenizer
 from model import TextToTextTransformer
+from evaluate import greedy_decode
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+try:
+    from benchmark.ted_eval import EvalConfig, evaluate_target
+except ImportError:
+    from ted_eval import EvalConfig, evaluate_target
+
+
+def resolve_parquet_inputs(data_parquet_path: str) -> list[str]:
+    path = Path(data_parquet_path).expanduser()
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    else:
+        path = path.resolve()
+
+    if path.is_file():
+        if path.suffix.lower() != ".parquet":
+            raise ValueError(f"Expected a parquet file, got: {path}")
+        parquet_files = [str(path)]
+    elif path.is_dir():
+        parquet_files = sorted(str(parquet_file) for parquet_file in path.glob("*.parquet"))
+    else:
+        raise FileNotFoundError(f"Data path does not exist: {path}")
+
+    if not parquet_files:
+        raise RuntimeError(f"No .parquet files found under {path}")
+
+    return parquet_files
+
 
 class TEDDataModule(pl.LightningDataModule):
     def __init__(
@@ -21,6 +60,9 @@ class TEDDataModule(pl.LightningDataModule):
         max_src_len: int = 512,
         max_tgt_len: int = 256,
         num_workers: int = 0,
+        benchmark_eval_subset_size: int = 100,
+        benchmark_eval_fixed_subset: bool = True,
+        benchmark_eval_seed: int = 42,
     ):
         super().__init__()
         self.data_parquet_folder = data_parquet_folder
@@ -28,20 +70,19 @@ class TEDDataModule(pl.LightningDataModule):
         self.max_src_len = max_src_len
         self.max_tgt_len = max_tgt_len
         self.num_workers = num_workers
+        self.benchmark_eval_subset_size = benchmark_eval_subset_size
+        self.benchmark_eval_fixed_subset = benchmark_eval_fixed_subset
+        self.benchmark_eval_seed = benchmark_eval_seed
         self.src_tokenizer = None
         self.tgt_tokenizer = None
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
+        self.benchmark_val_subset = None
+        self._benchmark_subset_calls = 0
 
     def setup(self, stage: str | None = None):
-        # Read all Parquet files from the provided folder
-        parquet_files = [
-            os.path.join(self.data_parquet_folder, f)
-            for f in os.listdir(self.data_parquet_folder)
-            if f.endswith(".parquet")
-        ]
-        parquet_files = sorted(parquet_files)
+        parquet_files = resolve_parquet_inputs(self.data_parquet_folder)
         # Fit tokenizers on a subset of data (same columns as dataset: sequence, chopping_star)
         df = _load_paths(parquet_files[:3] if len(parquet_files) >= 3 else parquet_files)
         self.src_tokenizer = TextTokenizer().fit(df["sequence"].astype(str).tolist())
@@ -54,25 +95,46 @@ class TEDDataModule(pl.LightningDataModule):
             self.max_tgt_len,
         )
 
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.train_dataset,
+        if self.val_dataset is not None and len(self.val_dataset) > 0:
+            self.benchmark_val_subset = Subset(self.val_dataset, self._select_benchmark_indices())
+
+    def _select_benchmark_indices(self):
+        subset_size = min(self.benchmark_eval_subset_size, len(self.val_dataset))
+        if subset_size <= 0:
+            return []
+
+        seed = self.benchmark_eval_seed
+        if not self.benchmark_eval_fixed_subset:
+            seed += self._benchmark_subset_calls
+            self._benchmark_subset_calls += 1
+
+        generator = torch.Generator().manual_seed(seed)
+        indices = torch.randperm(len(self.val_dataset), generator=generator)[:subset_size].tolist()
+        return indices
+
+    def _build_loader(self, dataset, shuffle: bool):
+        return DataLoader(
+            dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=shuffle,
             collate_fn=lambda b: collate_fn(b, self.src_tokenizer.pad_id, self.tgt_tokenizer.pad_id),
             num_workers=self.num_workers,
             pin_memory=True,
         )
 
+    def train_dataloader(self):
+        return self._build_loader(self.train_dataset, shuffle=True)
+
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            collate_fn=lambda b: collate_fn(b, self.src_tokenizer.pad_id, self.tgt_tokenizer.pad_id),
-            num_workers=self.num_workers,
-            pin_memory=True,
-        )
+        return self._build_loader(self.val_dataset, shuffle=False)
+
+    def benchmark_val_dataloader(self):
+        if self.val_dataset is None or len(self.val_dataset) == 0:
+            return None
+        if not self.benchmark_eval_fixed_subset:
+            self.benchmark_val_subset = Subset(self.val_dataset, self._select_benchmark_indices())
+        return self._build_loader(self.benchmark_val_subset, shuffle=False)
+
 
 class TEDLightningModule(pl.LightningModule):
     def __init__(
@@ -108,6 +170,7 @@ class TEDLightningModule(pl.LightningModule):
             max_tgt_len=max_tgt_len,
         )
         self.criterion = nn.CrossEntropyLoss(ignore_index=tgt_pad_id)
+        self.benchmark_eval_config = EvalConfig(input_indexing="one_based_inclusive")
 
     def forward(self, src, tgt_in, src_key_padding_mask=None, tgt_key_padding_mask=None):
         return self.model(
@@ -116,6 +179,15 @@ class TEDLightningModule(pl.LightningModule):
             src_key_padding_mask=src_key_padding_mask,
             tgt_key_padding_mask=tgt_key_padding_mask,
         )
+
+    def _move_batch_to_device(self, batch):
+        moved = {}
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                moved[key] = value.to(self.device)
+            else:
+                moved[key] = value
+        return moved
 
     def _shared_step(self, batch, src_pad_id, tgt_pad_id):
         src = batch["src"]
@@ -128,7 +200,6 @@ class TEDLightningModule(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx):
-        # Get pad ids from the dataloader's dataset
         src_pad_id = self.trainer.datamodule.src_tokenizer.pad_id
         tgt_pad_id = self.trainer.datamodule.tgt_tokenizer.pad_id
         loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
@@ -142,6 +213,86 @@ class TEDLightningModule(pl.LightningModule):
         self.log("eval_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
         return loss
 
+    def _mean_metric(self, values):
+        if not values:
+            return float("nan")
+        return float(np.nanmean(values))
+
+    def run_benchmark_evaluation(self, dataloader=None):
+        datamodule = self.trainer.datamodule
+        dataloader = dataloader or datamodule.benchmark_val_dataloader()
+        if dataloader is None:
+            return None
+
+        src_pad_id = datamodule.src_tokenizer.pad_id
+        tgt_pad_id = datamodule.tgt_tokenizer.pad_id
+        tgt_tokenizer = datamodule.tgt_tokenizer
+        was_training = self.training
+        metric_values = {
+            "iou_chain": [],
+            "ndo": [],
+            "correct_prop": [],
+            "correct_cath": [],
+            "boundary_distance_score": [],
+        }
+        loss_sum = 0.0
+        item_count = 0
+
+        self.eval()
+        with torch.no_grad():
+            for batch in dataloader:
+                batch = self._move_batch_to_device(batch)
+                batch_size = batch["src"].size(0)
+                loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
+                loss_sum += float(loss.detach().cpu()) * batch_size
+                item_count += batch_size
+
+                generated_ids = greedy_decode(
+                    self.model,
+                    batch["src"],
+                    src_pad_id=src_pad_id,
+                    tgt_pad_id=tgt_pad_id,
+                    sos_id=tgt_tokenizer.sos_id,
+                    eos_id=tgt_tokenizer.eos_id,
+                    max_len=self.hparams.max_tgt_len,
+                    device=self.device,
+                )
+
+                predictions = [
+                    tgt_tokenizer.decode(row.tolist(), strip_special=True)
+                    for row in generated_ids.detach().cpu()
+                ]
+
+                for src_text, tgt_text, pred_text in zip(batch["src_text"], batch["tgt_text"], predictions):
+                    metrics = evaluate_target(
+                        tgt_text,
+                        pred_text,
+                        nres=len(src_text),
+                        sequence=src_text,
+                        config=self.benchmark_eval_config,
+                    )
+                    metric_values["iou_chain"].append(float(metrics["iou_chain"]))
+                    metric_values["ndo"].append(float(metrics["ndo"]))
+                    metric_values["correct_prop"].append(float(metrics["correct_prop"]))
+                    metric_values["correct_cath"].append(float(metrics["correct_cath"]))
+                    metric_values["boundary_distance_score"].append(float(metrics["boundary_distance_score"]))
+
+        if was_training:
+            self.train()
+
+        if item_count == 0:
+            return None
+
+        return {
+            "eval_loss": loss_sum / item_count,
+            "val_subset_eval_loss": loss_sum / item_count,
+            "val_subset_iou_chain": self._mean_metric(metric_values["iou_chain"]),
+            "val_subset_ndo": self._mean_metric(metric_values["ndo"]),
+            "val_subset_correct_prop": self._mean_metric(metric_values["correct_prop"]),
+            "val_subset_correct_cath": self._mean_metric(metric_values["correct_cath"]),
+            "val_subset_boundary_distance_score": self._mean_metric(metric_values["boundary_distance_score"]),
+        }
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
@@ -150,9 +301,51 @@ class TEDLightningModule(pl.LightningModule):
         )
         return optimizer
 
+
+class PeriodicBenchmarkEvalCallback(Callback):
+    def __init__(self, eval_steps: int = 1000):
+        super().__init__()
+        self.eval_steps = eval_steps
+        self._last_eval_step = -1
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        global_step = trainer.global_step
+        if self.eval_steps <= 0 or global_step == 0:
+            return
+        if global_step % self.eval_steps != 0 or global_step == self._last_eval_step:
+            return
+
+        self._last_eval_step = global_step
+
+        if trainer.strategy is not None:
+            trainer.strategy.barrier("benchmark_eval_start")
+
+        if trainer.is_global_zero:
+            metrics = pl_module.run_benchmark_evaluation()
+            if metrics and trainer.logger is not None:
+                trainer.logger.log_metrics(metrics, step=global_step)
+                rank_zero_info(
+                    "Benchmark eval step "
+                    f"{global_step}: eval_loss={metrics['eval_loss']:.4f}, "
+                    f"iou_chain={metrics['val_subset_iou_chain']:.4f}, "
+                    f"ndo={metrics['val_subset_ndo']:.4f}, "
+                    f"correct_prop={metrics['val_subset_correct_prop']:.4f}, "
+                    f"correct_cath={metrics['val_subset_correct_cath']:.4f}, "
+                    f"boundary_distance_score={metrics['val_subset_boundary_distance_score']:.4f}"
+                )
+
+        if trainer.strategy is not None:
+            trainer.strategy.barrier("benchmark_eval_end")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_parquet_folder", type=str, default="data/parquet_sequences", help="Path to data.parquet")
+    parser.add_argument(
+        "--data_parquet_folder",
+        type=str,
+        default="data/all_parquet",
+        help="Path to a parquet directory or a single parquet file.",
+    )
     parser.add_argument("--batch_size", type=int, default=8, help="Per-GPU batch size")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -171,7 +364,28 @@ def main():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--accelerator", type=str, default="auto")
     parser.add_argument("--strategy", type=str, default="auto", help="e.g. ddp, ddp_spawn, auto")
+    parser.add_argument("--benchmark_eval_steps", type=int, default=1000, help="Run benchmark evaluation every N global training steps")
+    parser.add_argument("--benchmark_eval_subset_size", type=int, default=100, help="Number of validation examples used for periodic benchmark evaluation")
+    parser.add_argument("--benchmark_eval_seed", type=int, default=42, help="Seed for selecting the validation benchmark subset")
+    parser.add_argument(
+        "--benchmark_eval_random_subset",
+        action="store_true",
+        help="Resample the validation benchmark subset on each periodic evaluation instead of reusing a fixed subset",
+    )
     args = parser.parse_args()
+
+    if args.accelerator == "gpu":
+        if torch.version.cuda is None:
+            raise RuntimeError(
+                "PyTorch in the active environment is a CPU-only build "
+                f"(torch=={torch.__version__}, torch.version.cuda=None). "
+                "Install a CUDA-enabled PyTorch build in the current environment and rerun."
+            )
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "PyTorch was built with CUDA support, but no CUDA device is available to this job. "
+                "Check the Slurm GPU allocation and CUDA runtime visibility."
+            )
 
     dm = TEDDataModule(
         data_parquet_folder=args.data_parquet_folder,
@@ -179,10 +393,13 @@ def main():
         max_src_len=args.max_src_len,
         max_tgt_len=args.max_tgt_len,
         num_workers=args.num_workers,
+        benchmark_eval_subset_size=args.benchmark_eval_subset_size,
+        benchmark_eval_fixed_subset=not args.benchmark_eval_random_subset,
+        benchmark_eval_seed=args.benchmark_eval_seed,
     )
-    
+
     dm.setup()
-    
+
     model = TEDLightningModule(
         src_vocab_size=dm.src_tokenizer.vocab_size,
         tgt_vocab_size=dm.tgt_tokenizer.vocab_size,
@@ -200,10 +417,17 @@ def main():
     )
 
     load_dotenv()
-    wandb.login(key=os.getenv("WANDB_API_KEY"))
+    wandb_api_key = os.getenv("WANDB_API_KEY")
+    if not wandb_api_key:
+        raise RuntimeError(
+            "WANDB_API_KEY is not set. Export it in the shell or source it from the Slurm job "
+            "before running training."
+        )
+
+    wandb.login(key=wandb_api_key)
     wandb_logger = WandbLogger(
-        project="ted-transformer",
-        name="ted-transformer-lightning",
+        project=os.getenv("WANDB_PROJECT", "ted-transformer"),
+        name=os.getenv("WANDB_RUN_NAME", "ted-transformer-lightning"),
         config=vars(args),
     )
 
@@ -214,20 +438,20 @@ def main():
         mode="min",
         save_top_k=1,
     )
+    benchmark_callback = PeriodicBenchmarkEvalCallback(eval_steps=args.benchmark_eval_steps)
 
     trainer = pl.Trainer(
         max_epochs=args.epochs,
         accelerator=args.accelerator,
-        devices=torch.cuda.device_count(),
+        devices=1 if args.accelerator == "gpu" else "auto",
         strategy=args.strategy,
         logger=wandb_logger,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, benchmark_callback],
         gradient_clip_val=args.max_grad_norm,
     )
 
     trainer.fit(model, datamodule=dm)
 
-    # Save final PyTorch checkpoint
     if args.save_path and trainer.is_global_zero:
         torch.save(
             {
@@ -241,6 +465,7 @@ def main():
         print(f"Saved checkpoint to {args.save_path}")
 
     wandb.finish()
+
 
 if __name__ == "__main__":
     main()
