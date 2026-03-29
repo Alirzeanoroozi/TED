@@ -86,6 +86,7 @@ TRAIN_CMD=(
     --accelerator gpu
     --strategy auto
     --num_workers 4
+    --max_tgt_len 256
     --benchmark_eval_steps 1000
     --benchmark_eval_subset_size 100
     --benchmark_num_logged_samples 5

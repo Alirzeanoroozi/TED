@@ -227,7 +227,18 @@ class TEDLightningModule(pl.LightningModule):
             columns=[
                 "input_sequence",
                 "target_chopping_star",
+                "target_chopping_star_model",
+                "target_truncated_for_model",
                 "predicted_chopping_star",
+                "gt_parse_ok",
+                "pred_parse_ok",
+                "gt_parse_errors",
+                "pred_parse_errors",
+                "gt_parse_warnings",
+                "pred_parse_warnings",
+                "gt_domain_count",
+                "pred_domain_count",
+                "domain_count_match",
                 "iou_chain",
                 "ndo",
                 "correct_prop",
@@ -239,7 +250,18 @@ class TEDLightningModule(pl.LightningModule):
             table.add_data(
                 sample["input_sequence"],
                 sample["target_chopping_star"],
+                sample["target_chopping_star_model"],
+                sample["target_truncated_for_model"],
                 sample["predicted_chopping_star"],
+                sample["gt_parse_ok"],
+                sample["pred_parse_ok"],
+                sample["gt_parse_errors"],
+                sample["pred_parse_errors"],
+                sample["gt_parse_warnings"],
+                sample["pred_parse_warnings"],
+                sample["gt_domain_count"],
+                sample["pred_domain_count"],
+                sample["domain_count_match"],
                 sample["iou_chain"],
                 sample["ndo"],
                 sample["correct_prop"],
@@ -269,6 +291,10 @@ class TEDLightningModule(pl.LightningModule):
         item_count = 0
         sample_rows = []
         max_logged_samples = max(0, int(self.hparams.benchmark_num_logged_samples))
+        gt_parse_ok_count = 0
+        pred_parse_ok_count = 0
+        domain_count_match_count = 0
+        gt_truncated_for_model_count = 0
 
         self.eval()
         with torch.no_grad():
@@ -295,7 +321,13 @@ class TEDLightningModule(pl.LightningModule):
                     for row in generated_ids.detach().cpu()
                 ]
 
-                for src_text, tgt_text, pred_text in zip(batch["src_text"], batch["tgt_text"], predictions):
+                for src_text, tgt_text, tgt_text_model, tgt_was_truncated, pred_text in zip(
+                    batch["src_text"],
+                    batch["tgt_text"],
+                    batch["tgt_text_model"],
+                    batch["tgt_was_truncated"],
+                    predictions,
+                ):
                     metrics = evaluate_target(
                         tgt_text,
                         pred_text,
@@ -308,13 +340,28 @@ class TEDLightningModule(pl.LightningModule):
                     metric_values["correct_prop"].append(float(metrics["correct_prop"]))
                     metric_values["correct_cath"].append(float(metrics["correct_cath"]))
                     metric_values["boundary_distance_score"].append(float(metrics["boundary_distance_score"]))
+                    gt_parse_ok_count += int(bool(metrics["gt_parse_ok"]))
+                    pred_parse_ok_count += int(bool(metrics["pred_parse_ok"]))
+                    domain_count_match_count += int(bool(metrics["domain_count_match"]))
+                    gt_truncated_for_model_count += int(bool(tgt_was_truncated))
 
                     if len(sample_rows) < max_logged_samples:
                         sample_rows.append(
                             {
                                 "input_sequence": src_text,
                                 "target_chopping_star": tgt_text,
+                                "target_chopping_star_model": tgt_text_model,
+                                "target_truncated_for_model": bool(tgt_was_truncated),
                                 "predicted_chopping_star": pred_text,
+                                "gt_parse_ok": bool(metrics["gt_parse_ok"]),
+                                "pred_parse_ok": bool(metrics["pred_parse_ok"]),
+                                "gt_parse_errors": metrics["gt_parse_errors"],
+                                "pred_parse_errors": metrics["pred_parse_errors"],
+                                "gt_parse_warnings": metrics["gt_parse_warnings"],
+                                "pred_parse_warnings": metrics["pred_parse_warnings"],
+                                "gt_domain_count": int(metrics["gt_domain_count"]),
+                                "pred_domain_count": int(metrics["pred_domain_count"]),
+                                "domain_count_match": bool(metrics["domain_count_match"]),
                                 "iou_chain": float(metrics["iou_chain"]),
                                 "ndo": float(metrics["ndo"]),
                                 "correct_prop": float(metrics["correct_prop"]),
@@ -337,6 +384,10 @@ class TEDLightningModule(pl.LightningModule):
             "val_subset_correct_prop": self._mean_metric(metric_values["correct_prop"]),
             "val_subset_correct_cath": self._mean_metric(metric_values["correct_cath"]),
             "val_subset_boundary_distance_score": self._mean_metric(metric_values["boundary_distance_score"]),
+            "val_subset_gt_parse_ok_rate": gt_parse_ok_count / item_count,
+            "val_subset_pred_parse_ok_rate": pred_parse_ok_count / item_count,
+            "val_subset_domain_count_match_rate": domain_count_match_count / item_count,
+            "val_subset_target_truncated_for_model_rate": gt_truncated_for_model_count / item_count,
             "benchmark_samples_table": self._build_benchmark_samples_table(sample_rows),
         }
 
@@ -381,7 +432,9 @@ class PeriodicBenchmarkEvalCallback(Callback):
                     f"ndo={metrics['val_subset_ndo']:.4f}, "
                     f"correct_prop={metrics['val_subset_correct_prop']:.4f}, "
                     f"correct_cath={metrics['val_subset_correct_cath']:.4f}, "
-                    f"boundary_distance_score={metrics['val_subset_boundary_distance_score']:.4f}"
+                    f"boundary_distance_score={metrics['val_subset_boundary_distance_score']:.4f}, "
+                    f"pred_parse_ok_rate={metrics['val_subset_pred_parse_ok_rate']:.4f}, "
+                    f"target_truncated_for_model_rate={metrics['val_subset_target_truncated_for_model_rate']:.4f}"
                 )
 
         if trainer.strategy is not None:
@@ -408,7 +461,7 @@ def main():
     parser.add_argument("--dim_feedforward", type=int, default=1024)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--max_src_len", type=int, default=1024)
-    parser.add_argument("--max_tgt_len", type=int, default=128)
+    parser.add_argument("--max_tgt_len", type=int, default=256)
     parser.add_argument("--save_path", type=str, default="transformer_checkpoint.pt", help="Final checkpoint path (PyTorch .pt)")
     parser.add_argument("--save_dir", type=str, default="lightning_logs", help="Lightning checkpoint dir")
     parser.add_argument("--num_workers", type=int, default=0)

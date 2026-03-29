@@ -70,10 +70,12 @@ class SequenceToChoppingDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         src_text = str(row["sequence"]).strip()[: self.max_src_len]
-        tgt_text = str(row["chopping_star"]).strip()[: self.max_tgt_len]
+        tgt_text = str(row["chopping_star"]).strip()
+        tgt_text_model = tgt_text[: self.max_tgt_len]
+        tgt_was_truncated = len(tgt_text_model) != len(tgt_text)
 
         src_ids = self.src_tokenizer.encode(src_text, add_sos_eos=True)
-        tgt_ids = self.tgt_tokenizer.encode(tgt_text, add_sos_eos=True)
+        tgt_ids = self.tgt_tokenizer.encode(tgt_text_model, add_sos_eos=True)
 
         src = torch.tensor(src_ids, dtype=torch.long)
         tgt = torch.tensor(tgt_ids, dtype=torch.long)
@@ -88,6 +90,8 @@ class SequenceToChoppingDataset(Dataset):
             "tgt_len": tgt_out.size(0),
             "src_text": src_text,
             "tgt_text": tgt_text,
+            "tgt_text_model": tgt_text_model,
+            "tgt_was_truncated": tgt_was_truncated,
         }
 
 
@@ -105,6 +109,8 @@ def collate_fn(batch, pad_id_src, pad_id_tgt):
     tgt_len = torch.tensor([b["tgt_len"] for b in batch], dtype=torch.long)
     src_text = [b["src_text"] for b in batch]
     tgt_text = [b["tgt_text"] for b in batch]
+    tgt_text_model = [b["tgt_text_model"] for b in batch]
+    tgt_was_truncated = [b["tgt_was_truncated"] for b in batch]
     return {
         "src": src,
         "tgt_in": tgt_in,
@@ -113,6 +119,8 @@ def collate_fn(batch, pad_id_src, pad_id_tgt):
         "tgt_len": tgt_len,
         "src_text": src_text,
         "tgt_text": tgt_text,
+        "tgt_text_model": tgt_text_model,
+        "tgt_was_truncated": tgt_was_truncated,
     }
 
 
