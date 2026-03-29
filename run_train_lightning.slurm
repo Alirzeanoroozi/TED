@@ -8,13 +8,13 @@
 #SBATCH --partition=kutem_gpu
 #SBATCH --account=kutem
 #SBATCH --gres=gpu:1
-#SBATCH --output=/scratch/esevinc22/TED/logs/ted_lightning_train-%j.out
-#SBATCH --error=/scratch/esevinc22/TED/logs/ted_lightning_train-%j.out
+#SBATCH --output=/scratch/esevinc22/new_TED/logs/ted_lightning_train-%j.out
+#SBATCH --error=/scratch/esevinc22/new_TED/logs/ted_lightning_train-%j.out
 
 set -euo pipefail
 
-REPO_DIR="/scratch/esevinc22/TED/TED"
-SCRATCH_ROOT="/scratch/esevinc22/TED"
+REPO_DIR="/scratch/esevinc22/new_TED/TED"
+SCRATCH_ROOT="/scratch/esevinc22/new_TED"
 LOG_DIR="${SCRATCH_ROOT}/logs"
 CHECKPOINT_DIR="${REPO_DIR}/lightning_logs"
 ARTIFACT_DIR="${REPO_DIR}/artifacts"
@@ -71,7 +71,7 @@ if [[ -f "${WANDB_ENV_FILE}" ]]; then
     set +a
 fi
 
-export WANDB_PROJECT="${WANDB_PROJECT:-ted}"
+export WANDB_PROJECT="${WANDB_PROJECT:-ted_with_logs}"
 
 if [[ -z "${WANDB_API_KEY:-}" ]]; then
     echo "WANDB_API_KEY is not set. Create ${WANDB_ENV_FILE} with your W&B credentials." >&2
@@ -88,6 +88,7 @@ TRAIN_CMD=(
     --num_workers 4
     --benchmark_eval_steps 1000
     --benchmark_eval_subset_size 100
+    --benchmark_num_logged_samples 5
 )
 
 echo "Running command: ${TRAIN_CMD[*]}"

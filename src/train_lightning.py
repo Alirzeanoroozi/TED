@@ -153,6 +153,7 @@ class TEDLightningModule(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 0.01,
         max_grad_norm: float = 1.0,
+        benchmark_num_logged_samples: int = 5,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["tgt_pad_id"])
@@ -218,6 +219,35 @@ class TEDLightningModule(pl.LightningModule):
             return float("nan")
         return float(np.nanmean(values))
 
+    def _build_benchmark_samples_table(self, sample_rows):
+        if not sample_rows:
+            return None
+
+        table = wandb.Table(
+            columns=[
+                "input_sequence",
+                "target_chopping_star",
+                "predicted_chopping_star",
+                "iou_chain",
+                "ndo",
+                "correct_prop",
+                "correct_cath",
+                "boundary_distance_score",
+            ]
+        )
+        for sample in sample_rows:
+            table.add_data(
+                sample["input_sequence"],
+                sample["target_chopping_star"],
+                sample["predicted_chopping_star"],
+                sample["iou_chain"],
+                sample["ndo"],
+                sample["correct_prop"],
+                sample["correct_cath"],
+                sample["boundary_distance_score"],
+            )
+        return table
+
     def run_benchmark_evaluation(self, dataloader=None):
         datamodule = self.trainer.datamodule
         dataloader = dataloader or datamodule.benchmark_val_dataloader()
@@ -237,6 +267,8 @@ class TEDLightningModule(pl.LightningModule):
         }
         loss_sum = 0.0
         item_count = 0
+        sample_rows = []
+        max_logged_samples = max(0, int(self.hparams.benchmark_num_logged_samples))
 
         self.eval()
         with torch.no_grad():
@@ -277,6 +309,20 @@ class TEDLightningModule(pl.LightningModule):
                     metric_values["correct_cath"].append(float(metrics["correct_cath"]))
                     metric_values["boundary_distance_score"].append(float(metrics["boundary_distance_score"]))
 
+                    if len(sample_rows) < max_logged_samples:
+                        sample_rows.append(
+                            {
+                                "input_sequence": src_text,
+                                "target_chopping_star": tgt_text,
+                                "predicted_chopping_star": pred_text,
+                                "iou_chain": float(metrics["iou_chain"]),
+                                "ndo": float(metrics["ndo"]),
+                                "correct_prop": float(metrics["correct_prop"]),
+                                "correct_cath": float(metrics["correct_cath"]),
+                                "boundary_distance_score": float(metrics["boundary_distance_score"]),
+                            }
+                        )
+
         if was_training:
             self.train()
 
@@ -291,6 +337,7 @@ class TEDLightningModule(pl.LightningModule):
             "val_subset_correct_prop": self._mean_metric(metric_values["correct_prop"]),
             "val_subset_correct_cath": self._mean_metric(metric_values["correct_cath"]),
             "val_subset_boundary_distance_score": self._mean_metric(metric_values["boundary_distance_score"]),
+            "benchmark_samples_table": self._build_benchmark_samples_table(sample_rows),
         }
 
     def configure_optimizers(self):
@@ -323,7 +370,10 @@ class PeriodicBenchmarkEvalCallback(Callback):
         if trainer.is_global_zero:
             metrics = pl_module.run_benchmark_evaluation()
             if metrics and trainer.logger is not None:
+                sample_table = metrics.pop("benchmark_samples_table", None)
                 trainer.logger.log_metrics(metrics, step=global_step)
+                if sample_table is not None and isinstance(trainer.logger, WandbLogger):
+                    trainer.logger.experiment.log({"benchmark_samples": sample_table}, step=global_step)
                 rank_zero_info(
                     "Benchmark eval step "
                     f"{global_step}: eval_loss={metrics['eval_loss']:.4f}, "
@@ -367,6 +417,12 @@ def main():
     parser.add_argument("--benchmark_eval_steps", type=int, default=1000, help="Run benchmark evaluation every N global training steps")
     parser.add_argument("--benchmark_eval_subset_size", type=int, default=100, help="Number of validation examples used for periodic benchmark evaluation")
     parser.add_argument("--benchmark_eval_seed", type=int, default=42, help="Seed for selecting the validation benchmark subset")
+    parser.add_argument(
+        "--benchmark_num_logged_samples",
+        type=int,
+        default=5,
+        help="Number of qualitative benchmark examples to log to W&B on each periodic evaluation",
+    )
     parser.add_argument(
         "--benchmark_eval_random_subset",
         action="store_true",
@@ -414,6 +470,7 @@ def main():
         max_tgt_len=args.max_tgt_len,
         lr=args.lr,
         weight_decay=args.weight_decay,
+        benchmark_num_logged_samples=args.benchmark_num_logged_samples,
     )
 
     load_dotenv()
