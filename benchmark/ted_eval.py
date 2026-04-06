@@ -366,6 +366,33 @@ def _optimal_assignment(iou_matrix: np.ndarray) -> Tuple[float, List[Tuple[int, 
     return float(score), list(pairs)
 
 
+def _cath_level_score(pred_label: Optional[str], gt_label: Optional[str]) -> float:
+    """Compute hierarchical CATH match score (0.0–1.0).
+
+    Splits both labels on '.' and counts how many leading levels match.
+    Score = matched_levels / 4 (normalised to the 4 C.A.T.H levels).
+
+    Examples
+    --------
+    '3.40.50.300' vs '3.40.50.300'  -> 4/4 = 1.0
+    '3.40.50.300' vs '3.40.50.720'  -> 3/4 = 0.75
+    '3.40.50.300' vs '3.40.190.10'  -> 2/4 = 0.5
+    '3.40.50.300' vs '1.10.10.10'   -> 0/4 = 0.0  (C differs)
+    None          vs anything        -> 0.0
+    """
+    if pred_label is None or gt_label is None:
+        return 0.0
+    pred_parts = pred_label.strip().split(".")
+    gt_parts = gt_label.strip().split(".")
+    matched = 0
+    for p, g in zip(pred_parts, gt_parts):
+        if p == g:
+            matched += 1
+        else:
+            break
+    return matched / 4.0
+
+
 def chain_overlap_metrics(
     gt_parsed: ParsedAnnotation,
     pred_parsed: ParsedAnnotation,
@@ -386,6 +413,7 @@ def chain_overlap_metrics(
             "iou_chain": 1.0,
             "correct_prop": 1.0,
             "correct_cath_prop": 1.0,
+            "cath_level_score": 1.0,
         }
 
     if n_gt == 0 or n_pred == 0:
@@ -393,6 +421,7 @@ def chain_overlap_metrics(
             "iou_chain": 0.0,
             "correct_prop": 0.0,
             "correct_cath_prop": 0.0,
+            "cath_level_score": 0.0,
         }
 
     iou_matrix = np.zeros((n_pred, n_gt), dtype=float)
@@ -404,6 +433,7 @@ def chain_overlap_metrics(
 
     correct = 0
     correct_cath = 0
+    cath_level_scores: List[float] = []
     for i, j in pairs:
         iou_val = float(iou_matrix[i, j])
         if iou_val >= iou_threshold:
@@ -414,10 +444,18 @@ def chain_overlap_metrics(
         if pred_label == gt_label:
             correct_cath += 1
 
+        cath_level_scores.append(_cath_level_score(pred_label, gt_label))
+
+    # Unmatched domains score 0 for the CATH level metric — pad up to denom.
+    n_unmatched = denom - len(pairs)
+    cath_level_scores.extend([0.0] * n_unmatched)
+    mean_cath_level = float(np.mean(cath_level_scores)) if cath_level_scores else 0.0
+
     return {
         "iou_chain": total_iou / denom,
         "correct_prop": correct / denom,
         "correct_cath_prop": correct_cath / denom,
+        "cath_level_score": mean_cath_level,
     }
 
 
@@ -520,6 +558,8 @@ def evaluate_target(
 
     # Backward-compatible alias used in existing CSVs.
     out["correct_cath"] = out["correct_cath_prop"]
+    # Hierarchical CATH level score (0–1) aliased for convenience.
+    out["cath_level_score"] = out["cath_level_score"]
 
     try:
         out["ndo"] = float(ndo_score(gt_dict, pred_dict))
@@ -636,6 +676,7 @@ def summarize_metrics(metrics_df: pd.DataFrame) -> Tuple[Dict[str, Any], pd.Data
         "iou_chain",
         "correct_prop",
         "correct_cath_prop",
+        "cath_level_score",
         "ndo",
         "boundary_distance_score",
     ]

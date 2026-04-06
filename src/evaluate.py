@@ -1,5 +1,7 @@
 import os
 import argparse
+from enum import Enum, auto
+from typing import Set
 
 import torch
 
@@ -42,6 +44,226 @@ def greedy_decode(
             next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
             tgt = torch.cat([tgt, next_token], dim=1)
             if (next_token == eos_id).all():
+                break
+
+    return tgt
+
+
+class _GState(Enum):
+    """States of the chopping_star output grammar FSM.
+
+    Grammar (simplified):
+        output       := domain ( STAR domain )* EOS
+        domain       := segments PIPE cath_class
+        segments     := segment ( UNDERSCORE segment )*
+        segment      := DIGITS DASH DIGITS
+        cath_class   := DIGITS ( DOT DIGITS )*
+    """
+    RANGE_START_DIGIT   = auto()  # first digit(s) of a range start  e.g. "2"
+    RANGE_DASH          = auto()  # must emit '-'
+    RANGE_END_DIGIT     = auto()  # digit(s) of range end            e.g. "142"
+    AFTER_RANGE         = auto()  # can emit ' | '(space-pipe-space), '_', ' * ', or EOS
+    SPACE_BEFORE_PIPE   = auto()  # space before '|'
+    PIPE                = auto()  # must emit '|'
+    SPACE_AFTER_PIPE    = auto()  # space after '|'
+    CATH_DIGIT          = auto()  # digit(s) inside a CATH token
+    CATH_DOT_OR_END     = auto()  # can emit '.', ' * ', or EOS
+    SPACE_BEFORE_STAR   = auto()  # space before '*'
+    STAR                = auto()  # must emit '*'
+    SPACE_AFTER_STAR    = auto()  # space after '*'
+    UNDERSCORE          = auto()  # must emit '_'
+
+
+def _build_grammar_mask(
+    state: _GState,
+    token2id: dict,
+    vocab_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return a boolean mask (vocab_size,) where True = token is ALLOWED."""
+    allowed: Set[str] = set()
+
+    digits = set("0123456789")
+
+    if state == _GState.RANGE_START_DIGIT:
+        allowed = digits
+
+    elif state == _GState.RANGE_DASH:
+        allowed = {"-"}
+
+    elif state == _GState.RANGE_END_DIGIT:
+        allowed = digits
+
+    elif state == _GState.AFTER_RANGE:
+        # space (leading into ' | '), '_' for discontinuous, or EOS
+        allowed = {" ", "_"}
+        # EOS handled separately below
+
+    elif state == _GState.SPACE_BEFORE_PIPE:
+        allowed = {"|"}
+
+    elif state == _GState.PIPE:
+        allowed = {" "}
+
+    elif state == _GState.SPACE_AFTER_PIPE:
+        allowed = digits
+
+    elif state == _GState.CATH_DIGIT:
+        allowed = digits
+
+    elif state == _GState.CATH_DOT_OR_END:
+        # '.' continues CATH, ' ' starts ' * ' separator, EOS ends
+        allowed = {".", " "}
+
+    elif state == _GState.SPACE_BEFORE_STAR:
+        allowed = {"*"}
+
+    elif state == _GState.STAR:
+        allowed = {" "}
+
+    elif state == _GState.SPACE_AFTER_STAR:
+        allowed = digits
+
+    elif state == _GState.UNDERSCORE:
+        allowed = digits
+
+    mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+    for ch in allowed:
+        if ch in token2id:
+            mask[token2id[ch]] = True
+    return mask
+
+
+def _next_grammar_state(state: _GState, token: str) -> _GState:
+    """Transition the FSM given the emitted token character."""
+
+    digits = set("0123456789")
+
+    if state == _GState.RANGE_START_DIGIT:
+        if token in digits:
+            return _GState.RANGE_START_DIGIT
+        if token == "-":
+            return _GState.RANGE_END_DIGIT
+
+    elif state == _GState.RANGE_END_DIGIT:
+        if token in digits:
+            return _GState.RANGE_END_DIGIT
+        if token == " ":
+            return _GState.SPACE_BEFORE_PIPE
+        if token == "_":
+            return _GState.RANGE_START_DIGIT  # discontinuous next segment
+
+    elif state == _GState.SPACE_BEFORE_PIPE:
+        if token == "|":
+            return _GState.PIPE
+
+    elif state == _GState.PIPE:
+        if token == " ":
+            return _GState.SPACE_AFTER_PIPE
+
+    elif state == _GState.SPACE_AFTER_PIPE:
+        if token in digits:
+            return _GState.CATH_DIGIT
+
+    elif state == _GState.CATH_DIGIT:
+        if token in digits:
+            return _GState.CATH_DIGIT
+        if token == ".":
+            return _GState.CATH_DIGIT  # next level digit follows
+        if token == " ":
+            return _GState.SPACE_BEFORE_STAR
+
+    elif state == _GState.SPACE_BEFORE_STAR:
+        if token == "*":
+            return _GState.STAR
+
+    elif state == _GState.STAR:
+        if token == " ":
+            return _GState.SPACE_AFTER_STAR
+
+    elif state == _GState.SPACE_AFTER_STAR:
+        if token in digits:
+            return _GState.RANGE_START_DIGIT
+
+    # Fallback: stay in current state (should not happen with proper masking)
+    return state
+
+
+def grammar_guided_decode(
+    model: TextToTextTransformer,
+    src: torch.Tensor,
+    src_pad_id: int,
+    tgt_pad_id: int,
+    sos_id: int,
+    eos_id: int,
+    max_len: int,
+    device: torch.device,
+    token2id: dict,
+    id2token: dict,
+) -> torch.Tensor:
+    """Greedy decode with grammar-guided token masking.
+
+    At each step only tokens valid under the chopping_star grammar FSM are
+    allowed.  This guarantees every generated string is parseable.
+
+    Parameters
+    ----------
+    token2id / id2token:
+        The target tokenizer's vocabulary mappings.
+    All other parameters are identical to ``greedy_decode``.
+    """
+    model.eval()
+    src = src.to(device)
+    src_key_padding_mask = src.eq(src_pad_id)
+    vocab_size = len(token2id)
+
+    bsz = src.size(0)
+    tgt = torch.full((bsz, 1), sos_id, dtype=torch.long, device=device)
+
+    # Each sequence in the batch has its own FSM state.
+    states = [_GState.RANGE_START_DIGIT] * bsz
+    finished = [False] * bsz
+
+    with torch.no_grad():
+        for _ in range(max_len):
+            tgt_key_padding_mask = tgt.eq(tgt_pad_id)
+            logits = model(
+                src,
+                tgt,
+                src_key_padding_mask=src_key_padding_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+            )
+            next_logits = logits[:, -1, :].clone()  # (bsz, vocab)
+
+            next_tokens = []
+            for b in range(bsz):
+                if finished[b]:
+                    next_tokens.append(eos_id)
+                    continue
+
+                mask = _build_grammar_mask(states[b], token2id, vocab_size, device)
+                # Always allow EOS so decoding can terminate.
+                eos_tensor_idx = eos_id
+                if 0 <= eos_tensor_idx < vocab_size:
+                    mask[eos_tensor_idx] = True
+
+                # Apply mask: set disallowed logits to -inf.
+                row = next_logits[b].clone()
+                row[~mask] = float("-inf")
+
+                chosen = int(row.argmax().item())
+                next_tokens.append(chosen)
+
+                if chosen == eos_id:
+                    finished[b] = True
+                else:
+                    ch = id2token.get(chosen, "")
+                    states[b] = _next_grammar_state(states[b], ch)
+
+            next_token_tensor = torch.tensor(next_tokens, dtype=torch.long, device=device).unsqueeze(1)
+            tgt = torch.cat([tgt, next_token_tensor], dim=1)
+
+            if all(finished):
                 break
 
     return tgt

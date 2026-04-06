@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import argparse
 from pathlib import Path
@@ -6,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from dotenv import load_dotenv
 import wandb
 
@@ -18,7 +19,7 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_info
 from data.dataset_ import collate_fn, create_train_val_test_datasets, _load_paths
 from tokenizer_ import TextTokenizer
 from model import TextToTextTransformer
-from evaluate import greedy_decode
+from evaluate import greedy_decode, grammar_guided_decode
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -52,6 +53,55 @@ def resolve_parquet_inputs(data_parquet_path: str) -> list[str]:
     return parquet_files
 
 
+_CATH_RE = re.compile(r"\|\s*([\d.]+)")
+
+
+def _extract_cath_labels(chopping_star: str) -> list:
+    """Return all CATH class labels found in a chopping_star string."""
+    return _CATH_RE.findall(chopping_star)
+
+
+def _build_sample_weights(
+    train_df,
+    cap_multiplier: float = 10.0,
+) -> torch.Tensor:
+    """Compute per-sample WeightedRandomSampler weights.
+
+    Strategy: weight = 1 / sqrt(freq_of_rarest_cath_in_chain), then cap at
+    cap_multiplier × median weight so no sample dominates.
+
+    For samples with no parseable CATH label (unknown domains), assign the
+    median weight so they are sampled at the average rate.
+    """
+    chopping_stars = train_df["chopping_star"].astype(str).tolist()
+
+    # Count frequency of every CATH label across the whole training set.
+    freq: dict = {}
+    for cs in chopping_stars:
+        for label in _extract_cath_labels(cs):
+            freq[label] = freq.get(label, 0) + 1
+
+    raw_weights = []
+    for cs in chopping_stars:
+        labels = _extract_cath_labels(cs)
+        if labels:
+            # Use rarest CATH in this chain to set the weight.
+            rarest_freq = min(freq[lbl] for lbl in labels)
+            raw_weights.append(1.0 / (rarest_freq ** 0.5))
+        else:
+            raw_weights.append(None)  # placeholder; filled below
+
+    # Fill unknowns with median of the known weights.
+    known = [w for w in raw_weights if w is not None]
+    median_w = float(np.median(known)) if known else 1.0
+    raw_weights = [w if w is not None else median_w for w in raw_weights]
+
+    # Apply hard cap.
+    cap = cap_multiplier * median_w
+    weights = torch.tensor([min(w, cap) for w in raw_weights], dtype=torch.float)
+    return weights
+
+
 class TEDDataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -63,6 +113,8 @@ class TEDDataModule(pl.LightningDataModule):
         benchmark_eval_subset_size: int = 100,
         benchmark_eval_fixed_subset: bool = True,
         benchmark_eval_seed: int = 42,
+        weighted_sampling: bool = False,
+        sampling_cap_multiplier: float = 10.0,
     ):
         super().__init__()
         self.data_parquet_folder = data_parquet_folder
@@ -73,6 +125,8 @@ class TEDDataModule(pl.LightningDataModule):
         self.benchmark_eval_subset_size = benchmark_eval_subset_size
         self.benchmark_eval_fixed_subset = benchmark_eval_fixed_subset
         self.benchmark_eval_seed = benchmark_eval_seed
+        self.weighted_sampling = weighted_sampling
+        self.sampling_cap_multiplier = sampling_cap_multiplier
         self.src_tokenizer = None
         self.tgt_tokenizer = None
         self.train_dataset = None
@@ -80,6 +134,7 @@ class TEDDataModule(pl.LightningDataModule):
         self.test_dataset = None
         self.benchmark_val_subset = None
         self._benchmark_subset_calls = 0
+        self._train_sample_weights = None
 
     def setup(self, stage: str | None = None):
         parquet_files = resolve_parquet_inputs(self.data_parquet_folder)
@@ -94,6 +149,18 @@ class TEDDataModule(pl.LightningDataModule):
             self.max_src_len,
             self.max_tgt_len,
         )
+
+        if self.weighted_sampling and self.train_dataset is not None:
+            self._train_sample_weights = _build_sample_weights(
+                self.train_dataset.df,
+                cap_multiplier=self.sampling_cap_multiplier,
+            )
+            rank_zero_info(
+                f"Weighted sampling enabled: {len(self._train_sample_weights)} samples, "
+                f"weight range [{self._train_sample_weights.min():.4f}, "
+                f"{self._train_sample_weights.max():.4f}], "
+                f"cap_multiplier={self.sampling_cap_multiplier}"
+            )
 
         if self.val_dataset is not None and len(self.val_dataset) > 0:
             self.benchmark_val_subset = Subset(self.val_dataset, self._select_benchmark_indices())
@@ -112,17 +179,25 @@ class TEDDataModule(pl.LightningDataModule):
         indices = torch.randperm(len(self.val_dataset), generator=generator)[:subset_size].tolist()
         return indices
 
-    def _build_loader(self, dataset, shuffle: bool):
+    def _build_loader(self, dataset, shuffle: bool, sampler=None):
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             collate_fn=lambda b: collate_fn(b, self.src_tokenizer.pad_id, self.tgt_tokenizer.pad_id),
             num_workers=self.num_workers,
             pin_memory=True,
         )
 
     def train_dataloader(self):
+        if self.weighted_sampling and self._train_sample_weights is not None:
+            sampler = WeightedRandomSampler(
+                weights=self._train_sample_weights,
+                num_samples=len(self._train_sample_weights),
+                replacement=True,
+            )
+            return self._build_loader(self.train_dataset, shuffle=False, sampler=sampler)
         return self._build_loader(self.train_dataset, shuffle=True)
 
     def val_dataloader(self):
@@ -154,10 +229,12 @@ class TEDLightningModule(pl.LightningModule):
         weight_decay: float = 0.01,
         max_grad_norm: float = 1.0,
         benchmark_num_logged_samples: int = 5,
+        grammar_guided_decoding: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["tgt_pad_id"])
         self.tgt_pad_id = tgt_pad_id
+        self.grammar_guided_decoding = grammar_guided_decoding
         self.model = TextToTextTransformer(
             src_vocab_size=src_vocab_size,
             tgt_vocab_size=tgt_vocab_size,
@@ -243,6 +320,7 @@ class TEDLightningModule(pl.LightningModule):
                 "ndo",
                 "correct_prop",
                 "correct_cath",
+                "cath_level_score",
                 "boundary_distance_score",
             ]
         )
@@ -266,6 +344,7 @@ class TEDLightningModule(pl.LightningModule):
                 sample["ndo"],
                 sample["correct_prop"],
                 sample["correct_cath"],
+                sample["cath_level_score"],
                 sample["boundary_distance_score"],
             )
         return table
@@ -285,6 +364,7 @@ class TEDLightningModule(pl.LightningModule):
             "ndo": [],
             "correct_prop": [],
             "correct_cath": [],
+            "cath_level_score": [],
             "boundary_distance_score": [],
         }
         loss_sum = 0.0
@@ -305,16 +385,30 @@ class TEDLightningModule(pl.LightningModule):
                 loss_sum += float(loss.detach().cpu()) * batch_size
                 item_count += batch_size
 
-                generated_ids = greedy_decode(
-                    self.model,
-                    batch["src"],
-                    src_pad_id=src_pad_id,
-                    tgt_pad_id=tgt_pad_id,
-                    sos_id=tgt_tokenizer.sos_id,
-                    eos_id=tgt_tokenizer.eos_id,
-                    max_len=self.hparams.max_tgt_len,
-                    device=self.device,
-                )
+                if self.grammar_guided_decoding:
+                    generated_ids = grammar_guided_decode(
+                        self.model,
+                        batch["src"],
+                        src_pad_id=src_pad_id,
+                        tgt_pad_id=tgt_pad_id,
+                        sos_id=tgt_tokenizer.sos_id,
+                        eos_id=tgt_tokenizer.eos_id,
+                        max_len=self.hparams.max_tgt_len,
+                        device=self.device,
+                        token2id=tgt_tokenizer.token2id,
+                        id2token=tgt_tokenizer.id2token,
+                    )
+                else:
+                    generated_ids = greedy_decode(
+                        self.model,
+                        batch["src"],
+                        src_pad_id=src_pad_id,
+                        tgt_pad_id=tgt_pad_id,
+                        sos_id=tgt_tokenizer.sos_id,
+                        eos_id=tgt_tokenizer.eos_id,
+                        max_len=self.hparams.max_tgt_len,
+                        device=self.device,
+                    )
 
                 predictions = [
                     tgt_tokenizer.decode(row.tolist(), strip_special=True)
@@ -339,6 +433,7 @@ class TEDLightningModule(pl.LightningModule):
                     metric_values["ndo"].append(float(metrics["ndo"]))
                     metric_values["correct_prop"].append(float(metrics["correct_prop"]))
                     metric_values["correct_cath"].append(float(metrics["correct_cath"]))
+                    metric_values["cath_level_score"].append(float(metrics["cath_level_score"]))
                     metric_values["boundary_distance_score"].append(float(metrics["boundary_distance_score"]))
                     gt_parse_ok_count += int(bool(metrics["gt_parse_ok"]))
                     pred_parse_ok_count += int(bool(metrics["pred_parse_ok"]))
@@ -366,6 +461,7 @@ class TEDLightningModule(pl.LightningModule):
                                 "ndo": float(metrics["ndo"]),
                                 "correct_prop": float(metrics["correct_prop"]),
                                 "correct_cath": float(metrics["correct_cath"]),
+                                "cath_level_score": float(metrics["cath_level_score"]),
                                 "boundary_distance_score": float(metrics["boundary_distance_score"]),
                             }
                         )
@@ -383,6 +479,7 @@ class TEDLightningModule(pl.LightningModule):
             "val_subset_ndo": self._mean_metric(metric_values["ndo"]),
             "val_subset_correct_prop": self._mean_metric(metric_values["correct_prop"]),
             "val_subset_correct_cath": self._mean_metric(metric_values["correct_cath"]),
+            "val_subset_cath_level_score": self._mean_metric(metric_values["cath_level_score"]),
             "val_subset_boundary_distance_score": self._mean_metric(metric_values["boundary_distance_score"]),
             "val_subset_gt_parse_ok_rate": gt_parse_ok_count / item_count,
             "val_subset_pred_parse_ok_rate": pred_parse_ok_count / item_count,
@@ -432,6 +529,7 @@ class PeriodicBenchmarkEvalCallback(Callback):
                     f"ndo={metrics['val_subset_ndo']:.4f}, "
                     f"correct_prop={metrics['val_subset_correct_prop']:.4f}, "
                     f"correct_cath={metrics['val_subset_correct_cath']:.4f}, "
+                    f"cath_level_score={metrics['val_subset_cath_level_score']:.4f}, "
                     f"boundary_distance_score={metrics['val_subset_boundary_distance_score']:.4f}, "
                     f"pred_parse_ok_rate={metrics['val_subset_pred_parse_ok_rate']:.4f}, "
                     f"target_truncated_for_model_rate={metrics['val_subset_target_truncated_for_model_rate']:.4f}"
@@ -481,6 +579,22 @@ def main():
         action="store_true",
         help="Resample the validation benchmark subset on each periodic evaluation instead of reusing a fixed subset",
     )
+    parser.add_argument(
+        "--weighted_sampling",
+        action="store_true",
+        help="Use WeightedRandomSampler to oversample rare CATH labels during training",
+    )
+    parser.add_argument(
+        "--sampling_cap_multiplier",
+        type=float,
+        default=10.0,
+        help="Cap per-sample weights at this multiple of the median weight (default: 10)",
+    )
+    parser.add_argument(
+        "--grammar_guided_decoding",
+        action="store_true",
+        help="Use grammar-guided FSM decoding during benchmark evaluation (guarantees parseable output)",
+    )
     args = parser.parse_args()
 
     if args.accelerator == "gpu":
@@ -505,6 +619,8 @@ def main():
         benchmark_eval_subset_size=args.benchmark_eval_subset_size,
         benchmark_eval_fixed_subset=not args.benchmark_eval_random_subset,
         benchmark_eval_seed=args.benchmark_eval_seed,
+        weighted_sampling=args.weighted_sampling,
+        sampling_cap_multiplier=args.sampling_cap_multiplier,
     )
 
     dm.setup()
@@ -524,6 +640,7 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
         benchmark_num_logged_samples=args.benchmark_num_logged_samples,
+        grammar_guided_decoding=args.grammar_guided_decoding,
     )
 
     load_dotenv()
