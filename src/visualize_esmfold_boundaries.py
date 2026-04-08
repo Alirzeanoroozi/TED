@@ -474,10 +474,17 @@ def main():
     src_tokenizer = TextTokenizer().fit(fit_df["sequence"].astype(str).tolist())
     tgt_tokenizer = TextTokenizer().fit(fit_df["chopping_star"].astype(str).tolist())
 
-    # ── Load TED model ─────────────────────────────────────────────────────
+    # =========================================================================
+    # PHASE 1 — TED inference (runs first, then GPU memory is fully released)
+    # Both models cannot coexist in GPU memory, so we run TED, collect all
+    # predictions, then delete it before loading ESMFold.
+    # =========================================================================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.checkpoint, map_location=device)
     ckpt_args = ckpt.get("args", {})
+
+    max_src_len = ckpt_args.get("max_src_len", 1024)
+    max_tgt_len = ckpt_args.get("max_tgt_len", 256)
 
     ted_model = TextToTextTransformer(
         src_vocab_size=ckpt["src_vocab_size"],
@@ -488,52 +495,71 @@ def main():
         num_decoder_layers=ckpt_args.get("num_decoder_layers", 4),
         dim_feedforward=ckpt_args.get("dim_feedforward", 1024),
         dropout=ckpt_args.get("dropout", 0.1),
-        max_src_len=ckpt_args.get("max_src_len", 1024),
-        max_tgt_len=ckpt_args.get("max_tgt_len", 256),
+        max_src_len=max_src_len,
+        max_tgt_len=max_tgt_len,
     ).to(device)
     ted_model.load_state_dict(ckpt["model_state_dict"])
     ted_model.eval()
 
-    max_src_len = ckpt_args.get("max_src_len", 1024)
-    max_tgt_len = ckpt_args.get("max_tgt_len", 256)
-
-    # ── Load ESMFold ───────────────────────────────────────────────────────
-    esmfold = _load_esmfold()
-
-    # ── Main loop ──────────────────────────────────────────────────────────
-    figure_paths: List[Path] = []
-    failed = 0
-
+    print(f"\n── Phase 1: TED inference on {len(selected_df)} sequences ──")
+    inference_results: List[Dict] = []
     for idx, row in selected_df.iterrows():
         sequence = str(row["sequence"]).strip()
         gt_chopping = str(row.get("chopping_star", "")).strip()
         seq_id = str(row.get("uniprot_id", row.get("id", f"seq{idx}"))).strip()
-
-        print(f"[{idx + 1}/{len(selected_df)}] {seq_id}  len={len(sequence)}")
-
+        print(f"  [{idx + 1}/{len(selected_df)}] inferring {seq_id}  len={len(sequence)}")
         try:
-            # 1. ESMFold Cβ distance matrix
-            dist_matrix = _esmfold_cb_distance_matrix(esmfold, sequence)
-
-            # 2. TED prediction
             pred_chopping = _predict_chopping_star(
                 ted_model, src_tokenizer, tgt_tokenizer,
                 sequence, max_src_len, max_tgt_len, device,
                 use_grammar_guided=args.grammar_guided_decoding,
             )
+        except Exception as exc:
+            print(f"    TED inference ERROR on {seq_id}: {exc}")
+            pred_chopping = ""
+        inference_results.append({
+            "seq_id": seq_id,
+            "sequence": sequence,
+            "gt_chopping": gt_chopping,
+            "pred_chopping": pred_chopping,
+        })
 
-            # 3. Parse domains
+    # Explicitly free TED model from GPU before loading ESMFold.
+    del ted_model, ckpt
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    print("TED model unloaded from GPU.\n")
+
+    # =========================================================================
+    # PHASE 2 — ESMFold distograms + visualisation
+    # ESMFold is loaded only after TED has been removed from GPU memory.
+    # =========================================================================
+    print("── Phase 2: ESMFold distograms + plotting ──")
+    esmfold = _load_esmfold()
+
+    figure_paths: List[Path] = []
+    failed = 0
+
+    for entry in inference_results:
+        seq_id = entry["seq_id"]
+        sequence = entry["sequence"]
+        gt_chopping = entry["gt_chopping"]
+        pred_chopping = entry["pred_chopping"]
+        print(f"  ESMFold + plot: {seq_id}  len={len(sequence)}")
+
+        try:
+            dist_matrix = _esmfold_cb_distance_matrix(esmfold, sequence)
+
             pred_domains = _parse_chopping_star(pred_chopping, len(sequence))
             gt_domains = _parse_chopping_star(gt_chopping, len(sequence)) if args.show_gt else None
 
-            # 4. Plot and save
             fig_path = output_dir / f"{seq_id.replace('/', '_')}.png"
             _plot_single(dist_matrix, pred_domains, gt_domains, seq_id, fig_path)
             figure_paths.append(fig_path)
-            print(f"   Saved → {fig_path.name}  pred='{pred_chopping[:60]}…'")
+            print(f"    Saved → {fig_path.name}  pred='{pred_chopping[:60]}…'")
 
         except Exception as exc:
-            print(f"   ERROR on {seq_id}: {exc}")
+            print(f"    ERROR on {seq_id}: {exc}")
             failed += 1
             continue
 
