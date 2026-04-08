@@ -86,18 +86,18 @@ def _build_grammar_mask(
     digits = set("0123456789")
 
     if state == _GState.RANGE_START_DIGIT:
-        allowed = digits
+        # Digits of range start, then '-' to begin the end number
+        allowed = digits | {"-"}
 
     elif state == _GState.RANGE_DASH:
         allowed = {"-"}
 
     elif state == _GState.RANGE_END_DIGIT:
-        allowed = digits
+        # Digits of range end, then ' ' (leads to '|') or '_' (discontinuous segment)
+        allowed = digits | {" ", "_"}
 
     elif state == _GState.AFTER_RANGE:
-        # space (leading into ' | '), '_' for discontinuous, or EOS
         allowed = {" ", "_"}
-        # EOS handled separately below
 
     elif state == _GState.SPACE_BEFORE_PIPE:
         allowed = {"|"}
@@ -106,13 +106,14 @@ def _build_grammar_mask(
         allowed = {" "}
 
     elif state == _GState.SPACE_AFTER_PIPE:
-        allowed = digits
+        # Digits start a CATH class; '-' represents unknown CATH label
+        allowed = digits | {"-"}
 
     elif state == _GState.CATH_DIGIT:
-        allowed = digits
+        # More CATH digits, '.' between hierarchy levels, or ' ' before ' * ' / EOS
+        allowed = digits | {".", " "}
 
     elif state == _GState.CATH_DOT_OR_END:
-        # '.' continues CATH, ' ' starts ' * ' separator, EOS ends
         allowed = {".", " "}
 
     elif state == _GState.SPACE_BEFORE_STAR:
@@ -163,6 +164,9 @@ def _next_grammar_state(state: _GState, token: str) -> _GState:
 
     elif state == _GState.SPACE_AFTER_PIPE:
         if token in digits:
+            return _GState.CATH_DIGIT
+        if token == "-":
+            # Unknown CATH label represented as '-'; after this only ' * ' or EOS is valid
             return _GState.CATH_DIGIT
 
     elif state == _GState.CATH_DIGIT:
