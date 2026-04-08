@@ -1,3 +1,4 @@
+import gc
 import os
 import re
 import sys
@@ -63,12 +64,20 @@ def _extract_cath_labels(chopping_star: str) -> list:
 
 def _build_sample_weights(
     train_df,
-    cap_multiplier: float = 10.0,
+    alpha: float = 0.2,
 ) -> torch.Tensor:
     """Compute per-sample WeightedRandomSampler weights.
 
-    Strategy: weight = 1 / sqrt(freq_of_rarest_cath_in_chain), then cap at
-    cap_multiplier × median weight so no sample dominates.
+    Strategy: weight = 1 / freq^alpha, where alpha controls smoothing strength.
+
+        alpha=0.0  ->  uniform sampling (no rebalancing)
+        alpha=0.1  ->  ~3x max oversampling of rarest vs most common class
+        alpha=0.2  ->  ~8x max oversampling  (recommended default)
+        alpha=0.5  ->  ~184x (old sqrt formula, too aggressive)
+
+    Using the rarest CATH label in a chain to set the chain's weight means
+    multi-domain chains containing a rare domain get boosted — the target
+    behaviour for improving rare-class coverage.
 
     For samples with no parseable CATH label (unknown domains), assign the
     median weight so they are sampled at the average rate.
@@ -85,9 +94,8 @@ def _build_sample_weights(
     for cs in chopping_stars:
         labels = _extract_cath_labels(cs)
         if labels:
-            # Use rarest CATH in this chain to set the weight.
             rarest_freq = min(freq[lbl] for lbl in labels)
-            raw_weights.append(1.0 / (rarest_freq ** 0.5))
+            raw_weights.append(1.0 / (rarest_freq ** alpha))
         else:
             raw_weights.append(None)  # placeholder; filled below
 
@@ -96,9 +104,7 @@ def _build_sample_weights(
     median_w = float(np.median(known)) if known else 1.0
     raw_weights = [w if w is not None else median_w for w in raw_weights]
 
-    # Apply hard cap.
-    cap = cap_multiplier * median_w
-    weights = torch.tensor([min(w, cap) for w in raw_weights], dtype=torch.float)
+    weights = torch.tensor(raw_weights, dtype=torch.float)
     return weights
 
 
@@ -114,7 +120,7 @@ class TEDDataModule(pl.LightningDataModule):
         benchmark_eval_fixed_subset: bool = True,
         benchmark_eval_seed: int = 42,
         weighted_sampling: bool = False,
-        sampling_cap_multiplier: float = 10.0,
+        sampling_alpha: float = 0.2,
     ):
         super().__init__()
         self.data_parquet_folder = data_parquet_folder
@@ -126,7 +132,7 @@ class TEDDataModule(pl.LightningDataModule):
         self.benchmark_eval_fixed_subset = benchmark_eval_fixed_subset
         self.benchmark_eval_seed = benchmark_eval_seed
         self.weighted_sampling = weighted_sampling
-        self.sampling_cap_multiplier = sampling_cap_multiplier
+        self.sampling_alpha = sampling_alpha
         self.src_tokenizer = None
         self.tgt_tokenizer = None
         self.train_dataset = None
@@ -153,13 +159,13 @@ class TEDDataModule(pl.LightningDataModule):
         if self.weighted_sampling and self.train_dataset is not None:
             self._train_sample_weights = _build_sample_weights(
                 self.train_dataset.df,
-                cap_multiplier=self.sampling_cap_multiplier,
+                alpha=self.sampling_alpha,
             )
             rank_zero_info(
                 f"Weighted sampling enabled: {len(self._train_sample_weights)} samples, "
                 f"weight range [{self._train_sample_weights.min():.4f}, "
                 f"{self._train_sample_weights.max():.4f}], "
-                f"cap_multiplier={self.sampling_cap_multiplier}"
+                f"alpha={self.sampling_alpha}"
             )
 
         if self.val_dataset is not None and len(self.val_dataset) > 0:
@@ -601,6 +607,11 @@ class PeriodicBenchmarkEvalCallback(Callback):
                     )
                 rank_zero_info(log_msg)
 
+                # Explicitly release the table and metrics dict so wandb doesn't
+                # accumulate all logged tables in memory across 100+ eval steps.
+                del sample_table, metrics
+                gc.collect()
+
         if trainer.strategy is not None:
             trainer.strategy.barrier("benchmark_eval_end")
 
@@ -651,10 +662,11 @@ def main():
         help="Use WeightedRandomSampler to oversample rare CATH labels during training",
     )
     parser.add_argument(
-        "--sampling_cap_multiplier",
+        "--sampling_alpha",
         type=float,
-        default=10.0,
-        help="Cap per-sample weights at this multiple of the median weight (default: 10)",
+        default=0.2,
+        help="Exponent for frequency-based sampling weights: weight = 1/freq^alpha. "
+             "0=uniform, 0.1=~3x max boost, 0.2=~8x max boost (default: 0.2)",
     )
     parser.add_argument(
         "--grammar_guided_decoding",
@@ -686,7 +698,7 @@ def main():
         benchmark_eval_fixed_subset=not args.benchmark_eval_random_subset,
         benchmark_eval_seed=args.benchmark_eval_seed,
         weighted_sampling=args.weighted_sampling,
-        sampling_cap_multiplier=args.sampling_cap_multiplier,
+        sampling_alpha=args.sampling_alpha,
     )
 
     dm.setup()
