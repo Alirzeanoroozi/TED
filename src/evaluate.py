@@ -299,6 +299,11 @@ def main() -> None:
         default=None,
         help="Maximum generated target length (defaults to checkpoint max_tgt_len).",
     )
+    parser.add_argument(
+        "--grammar_guided_decoding",
+        action="store_true",
+        help="Use grammar-guided FSM decoding instead of greedy decoding.",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -370,17 +375,32 @@ def main() -> None:
             dtype=torch.long,
         ).unsqueeze(0)
 
-        generated_ids = greedy_decode(
-            model,
-            src_tensor,
-            src_pad_id=src_tokenizer.pad_id,
-            tgt_pad_id=tgt_tokenizer.pad_id,
-            sos_id=tgt_tokenizer.sos_id,
-            eos_id=tgt_tokenizer.eos_id,
-            max_len=max_tgt_len,
-            device=device,
-        )[0].tolist()
+        if args.grammar_guided_decoding:
+            generated_ids = grammar_guided_decode(
+                model,
+                src_tensor,
+                src_pad_id=src_tokenizer.pad_id,
+                tgt_pad_id=tgt_tokenizer.pad_id,
+                sos_id=tgt_tokenizer.sos_id,
+                eos_id=tgt_tokenizer.eos_id,
+                max_len=max_tgt_len,
+                device=device,
+                token2id=tgt_tokenizer.token2id,
+                id2token=tgt_tokenizer.id2token,
+            )[0].tolist()
+        else:
+            generated_ids = greedy_decode(
+                model,
+                src_tensor,
+                src_pad_id=src_tokenizer.pad_id,
+                tgt_pad_id=tgt_tokenizer.pad_id,
+                sos_id=tgt_tokenizer.sos_id,
+                eos_id=tgt_tokenizer.eos_id,
+                max_len=max_tgt_len,
+                device=device,
+            )[0].tolist()
 
+        decode_mode = "GRAMMAR-GUIDED" if args.grammar_guided_decoding else "GREEDY"
         pred_text = tgt_tokenizer.decode(generated_ids, strip_special=True)
 
         print("=" * 80)
@@ -388,7 +408,7 @@ def main() -> None:
         print(src_text)
         print("\nTARGET (chopping_star):")
         print(tgt_true)
-        print("\nPREDICTION:")
+        print(f"\nPREDICTION ({decode_mode}):")
         print(pred_text)
 
 
