@@ -1,6 +1,9 @@
 *.pyc
 .DS_Store
 logs/
+*.out
+*.err
+slurm-*.out
 
 data/*
 !data/chains.ted.csv
