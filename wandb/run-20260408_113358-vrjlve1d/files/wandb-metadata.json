@@ -1,0 +1,102 @@
+{
+  "os": "Linux-4.18.0-513.24.1.el8_9.x86_64-x86_64-with-glibc2.28",
+  "python": "CPython 3.10.20",
+  "startedAt": "2026-04-08T08:33:58.315646Z",
+  "args": [
+    "--data_parquet_folder",
+    "/scratch/esevinc22/new_TED/TED/data/all_parquet",
+    "--save_dir",
+    "/scratch/esevinc22/new_TED/TED/lightning_logs",
+    "--save_path",
+    "/scratch/esevinc22/new_TED/TED/artifacts/transformer_checkpoint.pt",
+    "--accelerator",
+    "gpu",
+    "--strategy",
+    "auto",
+    "--num_workers",
+    "0",
+    "--max_tgt_len",
+    "256",
+    "--benchmark_eval_steps",
+    "1000",
+    "--benchmark_eval_subset_size",
+    "100",
+    "--benchmark_num_logged_samples",
+    "5"
+  ],
+  "program": "/scratch/esevinc22/new_TED/TED/src/train_lightning.py",
+  "codePath": "src/train_lightning.py",
+  "codePathLocal": "src/train_lightning.py",
+  "git": {
+    "remote": "https://github.com/Alirzeanoroozi/TED",
+    "commit": "b1b5710df0a86d84952ef669ab7a6751837735d2"
+  },
+  "email": "esevinc22@ku.edu.tr",
+  "root": ".",
+  "host": "rk02.kuvalar.ku.edu.tr",
+  "executable": "/home/esevinc22/.conda/envs/ted/bin/python",
+  "cpu_count": 128,
+  "cpu_count_logical": 128,
+  "gpu": "NVIDIA A100-SXM4-40GB",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "933378551808",
+      "used": "10897113088"
+    }
+  },
+  "memory": {
+    "total": "540315484160"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A100-SXM4-40GB",
+      "memoryTotal": "42949672960",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-99ea2df9-b90b-9991-9e0a-1e0a97dd5dad"
+    }
+  ],
+  "cudaVersion": "12.9",
+  "slurm": {
+    "cluster_name": "valar",
+    "conf": "/etc/slurm/slurm.conf",
+    "cpus_on_node": "11",
+    "cpus_per_task": "11",
+    "gpus_on_node": "1",
+    "gtids": "0",
+    "job_account": "kutem",
+    "job_cpus_per_node": "11",
+    "job_end_time": "1775680402",
+    "job_gid": "1810810000",
+    "job_gpus": "6",
+    "job_id": "948109",
+    "job_name": "ted_lightning_train",
+    "job_nodelist": "rk02",
+    "job_num_nodes": "1",
+    "job_partition": "kutem_gpu",
+    "job_qos": "kutem",
+    "job_start_time": "1775637202",
+    "job_uid": "1160783",
+    "job_user": "esevinc22",
+    "jobid": "948109",
+    "localid": "0",
+    "mem_per_node": "40960",
+    "nnodes": "1",
+    "nodeid": "0",
+    "nodelist": "rk02",
+    "nprocs": "1",
+    "ntasks": "1",
+    "oom_kill_step": "0",
+    "prio_process": "0",
+    "procid": "0",
+    "submit_dir": "/scratch/esevinc22/new_TED/TED",
+    "submit_host": "login01.kuvalar.ku.edu.tr",
+    "task_pid": "1070346",
+    "tasks_per_node": "1",
+    "topology_addr": "rk02",
+    "topology_addr_pattern": "node",
+    "tres_per_task": "cpu=11"
+  },
+  "writerId": "5dan2mbvywgustni631lmvau06i4ozsr"
+}

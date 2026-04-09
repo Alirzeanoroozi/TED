@@ -193,7 +193,7 @@ class TEDDataModule(pl.LightningDataModule):
             sampler=sampler,
             collate_fn=lambda b: collate_fn(b, self.src_tokenizer.pad_id, self.tgt_tokenizer.pad_id),
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=(self.num_workers > 0),  # pinning is only beneficial with background workers
         )
 
     def train_dataloader(self):
@@ -352,10 +352,18 @@ class TEDLightningModule(pl.LightningModule):
                 tgt_tokenizer.decode(row.tolist(), strip_special=True)
                 for row in generated_ids.detach().cpu()
             ]
+            del generated_ids  # free GPU tensor immediately; don't wait for Python GC
+
+            # Cache src/tgt text fields before releasing the batch GPU tensors.
+            src_texts = batch["src_text"]
+            tgt_texts = batch["tgt_text"]
+            tgt_texts_model = batch["tgt_text_model"]
+            tgt_was_truncated_list = batch["tgt_was_truncated"]
+            del batch  # release GPU tensors (src, tgt_in, tgt_out) back to CUDA cache
 
             for src_text, tgt_text, tgt_text_model, tgt_was_truncated, pred_text in zip(
-                batch["src_text"], batch["tgt_text"], batch["tgt_text_model"],
-                batch["tgt_was_truncated"], predictions,
+                src_texts, tgt_texts, tgt_texts_model,
+                tgt_was_truncated_list, predictions,
             ):
                 metrics = evaluate_target(
                     tgt_text, pred_text,
@@ -611,6 +619,7 @@ class PeriodicBenchmarkEvalCallback(Callback):
                 # accumulate all logged tables in memory across 100+ eval steps.
                 del sample_table, metrics
                 gc.collect()
+                torch.cuda.empty_cache()  # return fragmented cached CUDA memory to the pool
 
         if trainer.strategy is not None:
             trainer.strategy.barrier("benchmark_eval_end")

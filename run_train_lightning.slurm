@@ -2,7 +2,7 @@
 #SBATCH --job-name=ted_lightning_train
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=40G
 #SBATCH --time=24:00:00
 #SBATCH --partition=kutem_gpu
@@ -63,6 +63,10 @@ fi
 
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
+# Force glibc to return freed heap pages to the OS immediately, preventing
+# RSS from growing unboundedly over millions of training steps with num_workers=0.
+export MALLOC_TRIM_THRESHOLD_=0
+export MALLOC_MMAP_THRESHOLD_=131072
 
 if [[ -f "${WANDB_ENV_FILE}" ]]; then
     # Load private W&B credentials from a non-repo file.
@@ -85,7 +89,7 @@ TRAIN_CMD=(
     --save_path "${ARTIFACT_DIR}/transformer_checkpoint.pt"
     --accelerator gpu
     --strategy auto
-    --num_workers 4
+    --num_workers 0
     --max_tgt_len 256
     --benchmark_eval_steps 1000
     --benchmark_eval_subset_size 100
