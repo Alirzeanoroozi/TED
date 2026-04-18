@@ -1,11 +1,54 @@
-*.pyc
+# Python cache
+*.py[cod]
+__pycache__/
+*.so
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
 .DS_Store
-logs/
+Thumbs.db
+
+# Logs & SLURM outputs
+*.log
 *.out
 *.err
 slurm-*.out
+logs/
 
+# Environment / secrets
+.env
+.env.*
+secrets/
+credentials.json
+
+# Large data files
 data/*
 !data/chains.ted.csv
+*.fasta
+*.parquet
+*.h5
+*.hdf5
+*.pkl
+*.npy
+*.npz
+*.tsv
 
-transformer_checkpoint.pt
+# Model checkpoints & artifacts
+*.ckpt
+*.pt
+*.pth
+*.pth.tar
+artifacts/
+lightning_logs/
+
+# Weights & Biases experiment logs
+wandb/
+
+# Benchmark outputs (generated, not source)
+benchmark/eval_out/
+benchmark/results/
