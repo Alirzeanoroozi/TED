@@ -33,15 +33,25 @@ def greedy_decode(
     )
 
     with torch.no_grad():
+        # Encode the source sequence ONCE and reuse memory for every decode step.
+        # Previously the full encoder ran at each of the max_len decode steps,
+        # creating ~1 GB of attention intermediates 256 times per batch.
+        src_emb = model.pos_enc(model.src_embed(src))
+        memory = model.encoder(src_emb, src_key_padding_mask=src_key_padding_mask)
+
         for _ in range(max_len):
             tgt_key_padding_mask = tgt.eq(tgt_pad_id)
-            logits = model(
-                src,
-                tgt,
-                src_key_padding_mask=src_key_padding_mask,
+            tgt_len = tgt.size(1)
+            tgt_mask = model.generate_square_subsequent_mask(tgt_len, device)
+            tgt_emb = model.pos_enc(model.tgt_embed(tgt))
+            out = model.decoder(
+                tgt_emb,
+                memory,
+                tgt_mask=tgt_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
             )
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            next_token = model.fc_out(out)[:, -1, :].argmax(dim=-1, keepdim=True)
             tgt = torch.cat([tgt, next_token], dim=1)
             if (next_token == eos_id).all():
                 break
@@ -229,15 +239,23 @@ def grammar_guided_decode(
     finished = [False] * bsz
 
     with torch.no_grad():
+        # Encode the source sequence ONCE and reuse memory for every decode step.
+        src_emb = model.pos_enc(model.src_embed(src))
+        memory = model.encoder(src_emb, src_key_padding_mask=src_key_padding_mask)
+
         for _ in range(max_len):
             tgt_key_padding_mask = tgt.eq(tgt_pad_id)
-            logits = model(
-                src,
-                tgt,
-                src_key_padding_mask=src_key_padding_mask,
+            tgt_len = tgt.size(1)
+            tgt_mask = model.generate_square_subsequent_mask(tgt_len, device)
+            tgt_emb = model.pos_enc(model.tgt_embed(tgt))
+            out = model.decoder(
+                tgt_emb,
+                memory,
+                tgt_mask=tgt_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
             )
-            next_logits = logits[:, -1, :].clone()  # (bsz, vocab)
+            next_logits = model.fc_out(out)[:, -1, :]  # (bsz, vocab)
 
             next_tokens = []
             for b in range(bsz):
@@ -246,12 +264,9 @@ def grammar_guided_decode(
                     continue
 
                 mask = _build_grammar_mask(states[b], token2id, vocab_size, device)
-                # Always allow EOS so decoding can terminate.
-                eos_tensor_idx = eos_id
-                if 0 <= eos_tensor_idx < vocab_size:
-                    mask[eos_tensor_idx] = True
+                if 0 <= eos_id < vocab_size:
+                    mask[eos_id] = True
 
-                # Apply mask: set disallowed logits to -inf.
                 row = next_logits[b].clone()
                 row[~mask] = float("-inf")
 

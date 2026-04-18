@@ -143,6 +143,11 @@ class TEDDataModule(pl.LightningDataModule):
         self._train_sample_weights = None
 
     def setup(self, stage: str | None = None):
+        if self.train_dataset is not None:
+            # Already set up (e.g. explicit call in main() before trainer.fit()).
+            # PL calls setup() again internally; skip to avoid loading all
+            # parquet files and recomputing sample weights a second time.
+            return
         parquet_files = resolve_parquet_inputs(self.data_parquet_folder)
         # Fit tokenizers on a subset of data (same columns as dataset: sequence, chopping_star)
         df = _load_paths(parquet_files[:3] if len(parquet_files) >= 3 else parquet_files)
