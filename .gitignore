@@ -39,7 +39,6 @@ data/*
 *.tsv
 
 # Model checkpoints & artifacts
-*.ckpt
 *.pt
 *.pth
 *.pth.tar

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Sampler, Subset
 from dotenv import load_dotenv
 import wandb
 
@@ -108,6 +108,37 @@ def _build_sample_weights(
     return weights
 
 
+class _StreamingWeightedSampler(Sampler):
+    """Memory-efficient weighted sampler.
+
+    PyTorch's built-in WeightedRandomSampler calls .tolist() on a tensor of
+    `num_samples` indices all at once, creating a ~46 MB Python list (28 bytes
+    per int × 1.29 M samples) that lives in RAM for the entire epoch.  It also
+    coerces the weights to float64 internally, doubling their footprint.
+
+    This sampler generates indices in small chunks so the peak extra allocation
+    is proportional to `chunk_size` (default 8 192 ≈ 230 KB), not to the full
+    epoch length.
+    """
+
+    def __init__(self, weights: torch.Tensor, num_samples: int, chunk_size: int = 8192):
+        self.weights = weights.float()  # keep as float32, not float64
+        self.num_samples = num_samples
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        remaining = self.num_samples
+        while remaining > 0:
+            n = min(self.chunk_size, remaining)
+            chunk = torch.multinomial(self.weights, n, replacement=True)
+            yield from chunk.tolist()
+            del chunk
+            remaining -= n
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+
 class TEDDataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -203,10 +234,9 @@ class TEDDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         if self.weighted_sampling and self._train_sample_weights is not None:
-            sampler = WeightedRandomSampler(
+            sampler = _StreamingWeightedSampler(
                 weights=self._train_sample_weights,
                 num_samples=len(self._train_sample_weights),
-                replacement=True,
             )
             return self._build_loader(self.train_dataset, shuffle=False, sampler=sampler)
         return self._build_loader(self.train_dataset, shuffle=True)
@@ -687,6 +717,12 @@ def main():
         action="store_true",
         help="Use grammar-guided FSM decoding during benchmark evaluation (guarantees parseable output)",
     )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to a Lightning .ckpt file to resume training from (model + optimizer + epoch state).",
+    )
     args = parser.parse_args()
 
     if args.accelerator == "gpu":
@@ -769,7 +805,7 @@ def main():
         gradient_clip_val=args.max_grad_norm,
     )
 
-    trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm, ckpt_path=args.resume_from_checkpoint)
 
     if args.save_path and trainer.is_global_zero:
         torch.save(
