@@ -1,0 +1,19 @@
+{
+  "cath_api_base": "https://www.cathdb.info/version/v4_3_0/api/rest",
+  "cath_assignment_method": "cath_database",
+  "created_at_utc": "2026-04-28T22:51:37+00:00",
+  "dry_run": false,
+  "input_csv": "/scratch/esevinc22/new_TED/TED/benchmark/chainsaw_cath1363_from_scratch/data/processed/chainsaw_cath1363_tedpred.csv",
+  "limit": 0,
+  "notes": "CATH labels are fetched from the CATH v4.3 REST API using the domain names in the raw CHAINSAW CSV (true_dnames column). Domain names like '4w7sA_d1' are converted to CATH domain IDs (0-based '4w7sA00' then 1-based '4w7sA01'). The TED label format '<start>-<end> | <cath_label> * ...' is preserved; '-' placeholders are replaced with actual CATH superfamily codes.",
+  "out_csv": "/scratch/esevinc22/new_TED/TED/benchmark/chainsaw_cath1363_from_scratch/data/processed_with_cath/chainsaw_cath1363_with_cath_labels.csv",
+  "raw_csv": "/scratch/esevinc22/new_TED/TED/benchmark/chainsaw_cath1363_from_scratch/data/raw/chainsaw_model_v3_on_cath1363_test.csv",
+  "stats": {
+    "cath_missing": 435,
+    "cath_resolved": 1771,
+    "domain_count_mismatch": 184,
+    "rows_total": 1356,
+    "rows_with_cath": 1150,
+    "rows_without_cath": 206
+  }
+}

@@ -1,0 +1,8 @@
+chain_id,reason
+6er6B,sequence_too_short:125<128
+3qvcA,missing_chainsaw_truth:invalid literal for int() with base 10: '1P'
+5jodA,missing_chainsaw_truth:invalid literal for int() with base 10: '1P'
+5inwA,missing_chainsaw_truth:invalid literal for int() with base 10: '335A'
+2fh5A,missing_chainsaw_truth:invalid literal for int() with base 10: '1A'
+3psgA,missing_chainsaw_truth:invalid literal for int() with base 10: '1P'
+1mh1A,missing_chainsaw_truth:invalid literal for int() with base 10: '1A'

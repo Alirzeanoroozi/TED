@@ -61,6 +61,7 @@ python benchmark/chainsaw_cath1363_from_scratch/run_benchmark.py \
     --checkpoint artifacts/transformer_checkpoint_grammar.pt \
     --data-parquet-dir data/all_parquet \
     --device cuda \
-    --output-dir benchmark/chainsaw_cath1363_from_scratch/results_grammar
+    --benchmark-csv benchmark/chainsaw_cath1363_from_scratch/data/processed_with_cath/chainsaw_cath1363_with_cath_labels.csv \
+    --output-dir benchmark/chainsaw_cath1363_from_scratch/results_with_CATH
 
 echo "Benchmark finished at $(date)"

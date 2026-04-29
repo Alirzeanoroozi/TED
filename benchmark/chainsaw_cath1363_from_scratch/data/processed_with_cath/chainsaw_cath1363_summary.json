@@ -1,0 +1,20 @@
+{
+  "classification_note": "CATH labels are '-' because this CHAINSAW benchmark evaluates domain boundaries.",
+  "created_at_utc": "2026-04-27T14:38:53Z",
+  "domain_group_counts": {
+    "multi": 703,
+    "single": 653
+  },
+  "excluded_csv": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/processed/chainsaw_cath1363_excluded.csv",
+  "indexing_note": "CHAINSAW ranges are zero-based inclusive; TEDPred labels are one-based inclusive.",
+  "out_csv": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/processed/chainsaw_cath1363_tedpred.csv",
+  "pdb_downloads": {
+    "already_exists": 33,
+    "downloaded": 1324
+  },
+  "raw_csv": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/raw/chainsaw_model_v3_on_cath1363_test.csv",
+  "raw_csv_sha256": "882091cbc2d96fc28ddb9ac6c02dbc981585964aced89eb706c5f720a9496e0d",
+  "rows_excluded": 7,
+  "rows_included": 1356,
+  "structures_dir": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/structures/pdb"
+}

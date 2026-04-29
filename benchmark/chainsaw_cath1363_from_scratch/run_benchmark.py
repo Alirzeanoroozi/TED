@@ -315,7 +315,7 @@ def make_figure(
     chainsaw_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    """Replicate Chainsaw Fig 6a: 3 metrics × 2 domain groups, Chainsaw vs TED-Pred."""
+    """3 metrics × 4 domain groups (Overall / Single / 2+), Chainsaw vs TED-Pred."""
 
     np.random.seed(42)
 
@@ -331,22 +331,22 @@ def make_figure(
     ]
 
     groups = [
-        ("1+ domains", tedpred_metrics["n_domains"] >= 1),
-        ("2+ domains", tedpred_metrics["n_domains"] >= 2),
+        ("Overall",      tedpred_metrics["n_domains"] >= 1),
+        ("Single domain", tedpred_metrics["n_domains"] == 1),
+        ("2+ domains",   tedpred_metrics["n_domains"] >= 2),
     ]
 
     methods = ["Chainsaw", "TED-Pred"]
 
-    fig, axes = plt.subplots(len(groups), len(metrics_cols), figsize=(10, 6.5))
-    if len(groups) == 1:
-        axes = axes[np.newaxis, :]
+    n_rows = len(groups)
+    n_cols = len(metrics_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10, 9.5))
 
     for row_idx, (group_label, group_mask) in enumerate(groups):
         subset_ted = tedpred_metrics[group_mask]
-        n = group_mask.sum()
+        n = int(group_mask.sum())
 
-        # Chainsaw scores: pull from pre-computed columns in the benchmark CSV
-        for col_idx, (ted_col, saw_col, ylabel) in enumerate(metrics_cols):
+        for col_idx, (ted_col, saw_col, metric_label) in enumerate(metrics_cols):
             ax = axes[row_idx, col_idx]
 
             # TED-Pred
@@ -354,7 +354,7 @@ def make_figure(
             ted_mean = float(np.nanmean(ted_vals))
             ted_lo, ted_hi = bootstrap_ci(ted_vals)
 
-            # Chainsaw (pre-computed, matched by target_id)
+            # Chainsaw (pre-computed per-chain scores carried in the merged df)
             saw_vals = subset_ted[saw_col].values.astype(float) if saw_col in subset_ted.columns else np.array([])
             if len(saw_vals) == 0 or np.all(np.isnan(saw_vals)):
                 saw_mean, saw_lo, saw_hi = math.nan, math.nan, math.nan
@@ -370,14 +370,15 @@ def make_figure(
                 [saw_lo, ted_lo],
                 [saw_hi, ted_hi],
                 [n, n],
-                ylabel=ylabel if col_idx == 0 else "",
-                title=title_str if row_idx == 0 else "",
+                ylabel=metric_label if col_idx == 0 else "",
+                title="",
             )
 
+            # First row: show metric name above group label; other rows: group label only
             if row_idx == 0:
-                ax.set_title(f"{ylabel}\n{title_str}", fontsize=8.5, pad=3)
+                ax.set_title(f"{metric_label}\n{title_str}", fontsize=8.5, pad=3)
             else:
-                ax.set_title(f"{title_str}", fontsize=8.5, pad=3)
+                ax.set_title(title_str, fontsize=8.5, pad=3)
 
     # legend
     legend_patches = [
@@ -400,13 +401,103 @@ def make_figure(
     print(f"Saved figure -> {output_path}")
 
 
+def make_cath_figure(
+    tedpred_metrics: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    """Bar chart for CATH exact-match and hierarchical level score (TED-Pred only).
+
+    Only meaningful when the benchmark CSV contains real CATH superfamily codes
+    in the ground-truth labels (i.e. when run with the CATH-enriched CSV produced
+    by add_cath_labels.py).  When labels contain '-' placeholders the bars will
+    be 0 and a warning is printed instead of saving the figure.
+    """
+    np.random.seed(42)
+
+    # cath_level_score > 0 only when gt contains real CATH codes (not '-' placeholders).
+    # correct_cath alone is an unreliable indicator: it counts None==None as a match
+    # when both pred and gt happen to emit '-', even with the original un-enriched CSV.
+    has_cath = (
+        "cath_level_score" in tedpred_metrics.columns
+        and float(tedpred_metrics["cath_level_score"].mean()) > 0
+    )
+    if not has_cath:
+        print(
+            "  Skipping CATH figure: cath_level_score is 0 — ground-truth labels "
+            "contain no real CATH superfamily codes.  Re-run with the CATH-enriched CSV "
+            "(data/processed_with_cath/) to generate this figure."
+        )
+        return
+
+    cath_metrics = [
+        ("correct_cath",     "CATH exact match\n(correct superfamily proportion)"),
+        ("cath_level_score", "CATH level score\n(hierarchical C.A.T.H match, 0–1)"),
+    ]
+    groups = [
+        ("Overall",       tedpred_metrics["n_domains"] >= 1),
+        ("Single domain", tedpred_metrics["n_domains"] == 1),
+        ("2+ domains",    tedpred_metrics["n_domains"] >= 2),
+    ]
+
+    n_rows = len(groups)
+    n_cols = len(cath_metrics)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6, 9))
+
+    for row_idx, (group_label, group_mask) in enumerate(groups):
+        subset = tedpred_metrics[group_mask]
+        n = int(group_mask.sum())
+
+        for col_idx, (col, metric_label) in enumerate(cath_metrics):
+            ax = axes[row_idx, col_idx]
+            vals = subset[col].values.astype(float)
+            mean = float(np.nanmean(vals))
+            lo, hi = bootstrap_ci(vals)
+
+            _bar_chart(
+                ax,
+                ["TED-Pred"],
+                [mean],
+                [lo],
+                [hi],
+                [n],
+                ylabel=metric_label if col_idx == 0 else "",
+                title="",
+            )
+
+            if row_idx == 0:
+                ax.set_title(f"{metric_label.split(chr(10))[0]}\n{group_label} (n={n})", fontsize=8.5, pad=3)
+            else:
+                ax.set_title(f"{group_label} (n={n})", fontsize=8.5, pad=3)
+
+    legend_patches = [
+        mpatches.Patch(color=METHOD_COLORS["TED-Pred"], label="TED-Pred (ours)"),
+    ]
+    fig.legend(handles=legend_patches, loc="lower center", ncol=1,
+               fontsize=9, frameon=False, bbox_to_anchor=(0.5, -0.04))
+
+    fig.suptitle(
+        "TED-Pred CATH accuracy on CATH-1363 test set\n"
+        "(bar plots show 95% CI via bootstrap)",
+        fontsize=10, y=1.02,
+    )
+
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved CATH figure -> {output_path}")
+
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
 def build_summary(metrics_df: pd.DataFrame) -> dict:
     np.random.seed(42)
-    metric_cols = ["iou_chain", "correct_prop", "boundary_distance_score", "ndo", "domain_count_match"]
+    metric_cols = [
+        "iou_chain", "correct_prop", "boundary_distance_score", "ndo",
+        "domain_count_match", "correct_cath", "cath_level_score",
+    ]
     summary = {"n_total": len(metrics_df), "groups": {}}
 
     group_defs = {
@@ -538,9 +629,16 @@ def main() -> None:
     print(f"Saved summary -> {summary_path}")
 
     # ----- print table -----
-    print("\n" + "=" * 65)
-    print(f"{'Group':<15} {'n':>5}  {'IoU':>6}  {'Correct%':>8}  {'DBD':>6}  {'NDO':>6}")
-    print("-" * 65)
+    has_cath = (
+        "cath_level_score" in metrics_df.columns
+        and float(metrics_df["cath_level_score"].mean()) > 0
+    )
+    cath_note = "" if has_cath else "  (CATH cols not meaningful — ground truth has no real CATH labels; use CATH-enriched CSV)"
+
+    print("\n" + "=" * 85)
+    print(f"{'Group':<15} {'n':>5}  {'IoU':>6}  {'Correct%':>8}  {'DBD':>6}  {'NDO':>6}"
+          f"  {'CorrectCAT':>10}  {'CATH-Lvl':>8}")
+    print("-" * 85)
 
     group_defs = [
         ("1+ domains", metrics_df["n_domains"] >= 1),
@@ -554,13 +652,19 @@ def main() -> None:
         corr   = float(sub["correct_prop"].mean()) if "correct_prop" in sub else math.nan
         dbd    = float(sub["boundary_distance_score"].mean()) if "boundary_distance_score" in sub else math.nan
         ndo    = float(sub["ndo"].mean()) if "ndo" in sub else math.nan
-        print(f"  TED-Pred {gname:<12} {len(sub):>5}  {iou:>6.3f}  {corr:>8.3f}  {dbd:>6.3f}  {ndo:>6.3f}")
+        ccath  = float(sub["correct_cath"].mean()) if "correct_cath" in sub.columns else math.nan
+        clvl   = float(sub["cath_level_score"].mean()) if "cath_level_score" in sub.columns else math.nan
+        print(f"  TED-Pred {gname:<12} {len(sub):>5}  {iou:>6.3f}  {corr:>8.3f}  "
+              f"{dbd:>6.3f}  {ndo:>6.3f}  {ccath:>10.3f}  {clvl:>8.3f}")
 
     print()
     for gname, data in chainsaw_summary.items():
         print(f"  Chainsaw {gname:<12} {data['n']:>5}  {data['iou']:>6.3f}  "
-              f"{data['correct_prop']:>8.3f}  {data['boundary_distance_score']:>6.3f}")
-    print("=" * 65)
+              f"{data['correct_prop']:>8.3f}  {data['boundary_distance_score']:>6.3f}"
+              f"  {'N/A':>10}  {'N/A':>8}")
+    print("=" * 85)
+    if cath_note:
+        print(cath_note)
 
     # ----- figure -----
     print("\nGenerating figure...")
@@ -579,6 +683,9 @@ def main() -> None:
 
     fig_path = out_dir / "figure6a.png"
     make_figure(metrics_with_saw, bench_df, fig_path)
+
+    cath_fig_path = out_dir / "figure_cath.png"
+    make_cath_figure(metrics_with_saw, cath_fig_path)
 
     print("\nDone.")
 
