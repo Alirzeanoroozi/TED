@@ -1,0 +1,46 @@
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/esevinc22/new_TED/TED/lightning_logs exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+┏━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name      ┃ Type                  ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model     │ TextToTextTransformer │  7.4 M │ train │     0 │
+│ 1 │ criterion │ CrossEntropyLoss      │      0 │ train │     0 │
+└───┴───────────┴───────────────────────┴────────┴───────┴───────┘
+Trainable params: 7.4 M
+Non-trainable params: 0
+Total params: 7.4 M
+Total estimated model params size (MB): 29
+Modules in train mode: 107
+Modules in eval mode: 0
+Total FLOPs: 0
+SLURM auto-requeueing enabled. Setting signal handlers.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:434: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=10` in the `DataLoader` to improve performance.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/torch/nn/modules/transformer.py:508: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. We recommend specifying layout=torch.jagged when constructing a nested tensor, as this layout receives active development, has better operator coverage, and works with torch.compile. (Triggered internally at /pytorch/aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:434: The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=10` in the `DataLoader` to improve performance.
+Benchmark eval step 1000: eval_loss=1.2763, iou_chain=0.0448, ndo=-0.4210, correct_prop=0.0033, correct_cath=0.1300, cath_level_score=0.0033, boundary_distance_score=0.4561, pred_parse_ok_rate=0.5400, target_truncated_for_model_rate=0.0000
+Benchmark eval step 2000: eval_loss=1.1437, iou_chain=0.4308, ndo=0.2911, correct_prop=0.1433, correct_cath=0.0000, cath_level_score=0.1196, boundary_distance_score=0.4453, pred_parse_ok_rate=0.9800, target_truncated_for_model_rate=0.0000
+Benchmark eval step 3000: eval_loss=1.0878, iou_chain=0.4703, ndo=0.3737, correct_prop=0.1500, correct_cath=0.0000, cath_level_score=0.1523, boundary_distance_score=0.4542, pred_parse_ok_rate=0.9600, target_truncated_for_model_rate=0.0000
+Benchmark eval step 4000: eval_loss=1.0634, iou_chain=0.3923, ndo=0.4628, correct_prop=0.1875, correct_cath=0.0000, cath_level_score=0.1146, boundary_distance_score=0.5382, pred_parse_ok_rate=0.6500, target_truncated_for_model_rate=0.0000
+Benchmark eval step 5000: eval_loss=1.0317, iou_chain=0.4491, ndo=0.3806, correct_prop=0.1650, correct_cath=0.0000, cath_level_score=0.1457, boundary_distance_score=0.4627, pred_parse_ok_rate=0.8700, target_truncated_for_model_rate=0.0000
+Benchmark eval step 6000: eval_loss=1.0278, iou_chain=0.4853, ndo=0.4183, correct_prop=0.2433, correct_cath=0.0000, cath_level_score=0.1458, boundary_distance_score=0.4936, pred_parse_ok_rate=0.2800, target_truncated_for_model_rate=0.0000
+Benchmark eval step 7000: eval_loss=1.0028, iou_chain=0.4396, ndo=0.4724, correct_prop=0.2217, correct_cath=0.0000, cath_level_score=0.1391, boundary_distance_score=0.5184, pred_parse_ok_rate=0.3600, target_truncated_for_model_rate=0.0000
+Benchmark eval step 8000: eval_loss=0.9825, iou_chain=0.4703, ndo=0.4006, correct_prop=0.2300, correct_cath=0.0000, cath_level_score=0.1599, boundary_distance_score=0.4796, pred_parse_ok_rate=0.8000, target_truncated_for_model_rate=0.0000
+Benchmark eval step 9000: eval_loss=0.9626, iou_chain=0.4589, ndo=0.4788, correct_prop=0.2620, correct_cath=0.0000, cath_level_score=0.1684, boundary_distance_score=0.6139, pred_parse_ok_rate=0.9100, target_truncated_for_model_rate=0.0000
+Benchmark eval step 10000: eval_loss=0.9607, iou_chain=0.3839, ndo=0.4707, correct_prop=0.1745, correct_cath=0.0000, cath_level_score=0.1288, boundary_distance_score=0.5726, pred_parse_ok_rate=0.2600, target_truncated_for_model_rate=0.0000
+Benchmark eval step 11000: eval_loss=0.9345, iou_chain=0.4539, ndo=0.4563, correct_prop=0.1950, correct_cath=0.0000, cath_level_score=0.1545, boundary_distance_score=0.5419, pred_parse_ok_rate=0.7100, target_truncated_for_model_rate=0.0000
+Benchmark eval step 12000: eval_loss=0.9233, iou_chain=0.5183, ndo=0.4573, correct_prop=0.2783, correct_cath=0.0000, cath_level_score=0.1748, boundary_distance_score=0.5455, pred_parse_ok_rate=1.0000, target_truncated_for_model_rate=0.0000
+Benchmark eval step 13000: eval_loss=0.9115, iou_chain=0.5288, ndo=0.5025, correct_prop=0.2583, correct_cath=0.0000, cath_level_score=0.1732, boundary_distance_score=0.5889, pred_parse_ok_rate=0.9000, target_truncated_for_model_rate=0.0000
+Benchmark eval step 14000: eval_loss=0.9019, iou_chain=0.5017, ndo=0.5007, correct_prop=0.2725, correct_cath=0.0050, cath_level_score=0.1493, boundary_distance_score=0.5886, pred_parse_ok_rate=0.8100, target_truncated_for_model_rate=0.0000
+Benchmark eval step 15000: eval_loss=0.8899, iou_chain=0.5131, ndo=0.5090, correct_prop=0.2514, correct_cath=0.0000, cath_level_score=0.1582, boundary_distance_score=0.6027, pred_parse_ok_rate=0.7800, target_truncated_for_model_rate=0.0000
+Benchmark eval step 16000: eval_loss=0.8823, iou_chain=0.5203, ndo=0.5215, correct_prop=0.3003, correct_cath=0.0000, cath_level_score=0.1736, boundary_distance_score=0.6271, pred_parse_ok_rate=0.8000, target_truncated_for_model_rate=0.0000
+Benchmark eval step 17000: eval_loss=0.8717, iou_chain=0.5120, ndo=0.4275, correct_prop=0.2400, correct_cath=0.0050, cath_level_score=0.1315, boundary_distance_score=0.5879, pred_parse_ok_rate=0.9300, target_truncated_for_model_rate=0.0000
+Benchmark eval step 18000: eval_loss=0.8567, iou_chain=0.5180, ndo=0.4977, correct_prop=0.2537, correct_cath=0.0033, cath_level_score=0.1358, boundary_distance_score=0.5529, pred_parse_ok_rate=0.8900, target_truncated_for_model_rate=0.0000
+Benchmark eval step 19000: eval_loss=0.8531, iou_chain=0.4844, ndo=0.5156, correct_prop=0.2558, correct_cath=0.0033, cath_level_score=0.1487, boundary_distance_score=0.5831, pred_parse_ok_rate=0.7300, target_truncated_for_model_rate=0.0000
+Benchmark eval step 20000: eval_loss=0.8421, iou_chain=0.4294, ndo=0.5310, correct_prop=0.2216, correct_cath=0.0000, cath_level_score=0.1405, boundary_distance_score=0.6295, pred_parse_ok_rate=0.6700, target_truncated_for_model_rate=0.0000
+Benchmark eval step 21000: eval_loss=0.8368, iou_chain=0.4452, ndo=0.5105, correct_prop=0.2174, correct_cath=0.0050, cath_level_score=0.1127, boundary_distance_score=0.6048, pred_parse_ok_rate=0.6500, target_truncated_for_model_rate=0.0000
+Benchmark eval step 22000: eval_loss=0.8369, iou_chain=0.4783, ndo=0.5336, correct_prop=0.2392, correct_cath=0.0000, cath_level_score=0.1322, boundary_distance_score=0.5973, pred_parse_ok_rate=0.8500, target_truncated_for_model_rate=0.0000
+Benchmark eval step 23000: eval_loss=0.8345, iou_chain=0.5223, ndo=0.5339, correct_prop=0.2692, correct_cath=0.0000, cath_level_score=0.1689, boundary_distance_score=0.6211, pred_parse_ok_rate=0.6700, target_truncated_for_model_rate=0.0000
+Benchmark eval step 24000: eval_loss=0.8293, iou_chain=0.4299, ndo=0.5219, correct_prop=0.2103, correct_cath=0.0033, cath_level_score=0.1309, boundary_distance_score=0.6004, pred_parse_ok_rate=0.7800, target_truncated_for_model_rate=0.0000
+Benchmark eval step 25000: eval_loss=0.8243, iou_chain=0.5407, ndo=0.5277, correct_prop=0.2875, correct_cath=0.0000, cath_level_score=0.1794, boundary_distance_score=0.5569, pred_parse_ok_rate=0.8400, target_truncated_for_model_rate=0.0000

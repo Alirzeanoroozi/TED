@@ -1,0 +1,25 @@
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/esevinc22/new_TED/TED/lightning_logs exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+┏━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name      ┃ Type                  ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model     │ TextToTextTransformer │  7.4 M │ train │     0 │
+│ 1 │ criterion │ CrossEntropyLoss      │      0 │ train │     0 │
+└───┴───────────┴───────────────────────┴────────┴───────┴───────┘
+Trainable params: 7.4 M
+Non-trainable params: 0
+Total params: 7.4 M
+Total estimated model params size (MB): 29
+Modules in train mode: 107
+Modules in eval mode: 0
+Total FLOPs: 0
+SLURM auto-requeueing enabled. Setting signal handlers.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/torch/nn/modules/transformer.py:508: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. We recommend specifying layout=torch.jagged when constructing a nested tensor, as this layout receives active development, has better operator coverage, and works with torch.compile. (Triggered internally at /pytorch/aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+Benchmark eval step 1000: eval_loss=1.2654, iou_chain=0.2515, ndo=-0.0115, correct_prop=0.0083, correct_cath=0.0150, cath_level_score=0.1412, boundary_distance_score=0.4613, pred_parse_ok_rate=0.5400, target_truncated_for_model_rate=0.0000
+Benchmark eval step 2000: eval_loss=1.1285, iou_chain=0.4089, ndo=0.2922, correct_prop=0.1887, correct_cath=0.0000, cath_level_score=0.1492, boundary_distance_score=0.4472, pred_parse_ok_rate=0.7800, target_truncated_for_model_rate=0.0000
+Benchmark eval step 3000: eval_loss=1.0960, iou_chain=0.3719, ndo=0.3234, correct_prop=0.1217, correct_cath=0.0020, cath_level_score=0.0977, boundary_distance_score=0.4388, pred_parse_ok_rate=0.5800, target_truncated_for_model_rate=0.0000
+Benchmark eval step 4000: eval_loss=1.0670, iou_chain=0.4453, ndo=0.3511, correct_prop=0.1800, correct_cath=0.0000, cath_level_score=0.1300, boundary_distance_score=0.4353, pred_parse_ok_rate=0.9500, target_truncated_for_model_rate=0.0000
+Benchmark eval step 5000: eval_loss=1.0364, iou_chain=0.4956, ndo=0.3925, correct_prop=0.2333, correct_cath=0.0000, cath_level_score=0.1723, boundary_distance_score=0.4774, pred_parse_ok_rate=0.8300, target_truncated_for_model_rate=0.0000
+Benchmark eval step 6000: eval_loss=1.0057, iou_chain=0.4836, ndo=0.4597, correct_prop=0.2608, correct_cath=0.0000, cath_level_score=0.1587, boundary_distance_score=0.5273, pred_parse_ok_rate=0.8900, target_truncated_for_model_rate=0.0000

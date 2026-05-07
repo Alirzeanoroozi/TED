@@ -1,0 +1,31 @@
+{
+  "downloaded_at_utc": "2026-04-27T14:18:20Z",
+  "files": [
+    {
+      "bytes": 724,
+      "name": "README.md",
+      "path": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/raw/README.md",
+      "sha256": "52e3762e972b71821e87fd860c3c08f9c53d7a03eb9b5f78e0583308e70b39f2",
+      "status": "downloaded",
+      "url": "https://raw.githubusercontent.com/JudeWells/chainsaw/main/data_and_benchmarking/README.md"
+    },
+    {
+      "bytes": 651867,
+      "name": "chainsaw_cath1363_train_test_splits.json",
+      "path": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/raw/chainsaw_cath1363_train_test_splits.json",
+      "sha256": "e0f364afb451f2469174d207dd2e348fab994f230b033f4a365ffecf4de79c37",
+      "status": "downloaded",
+      "url": "https://raw.githubusercontent.com/JudeWells/chainsaw/main/data_and_benchmarking/chainsaw_cath1363_train_test_splits.json"
+    },
+    {
+      "bytes": 220976,
+      "name": "chainsaw_model_v3_on_cath1363_test.csv",
+      "path": "/scratch/erkmenerken22/latestTED/TED/benchmark/chainsaw_cath1363_from_scratch/data/raw/chainsaw_model_v3_on_cath1363_test.csv",
+      "sha256": "882091cbc2d96fc28ddb9ac6c02dbc981585964aced89eb706c5f720a9496e0d",
+      "status": "downloaded",
+      "url": "https://raw.githubusercontent.com/JudeWells/chainsaw/main/data_and_benchmarking/chainsaw_model_v3_on_cath1363_test.csv"
+    }
+  ],
+  "source_ref": "main",
+  "source_repo": "https://github.com/JudeWells/chainsaw"
+}

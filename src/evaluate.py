@@ -1,5 +1,7 @@
 import os
 import argparse
+from enum import Enum, auto
+from typing import Set
 
 import torch
 
@@ -31,17 +33,256 @@ def greedy_decode(
     )
 
     with torch.no_grad():
+        # Encode the source sequence ONCE and reuse memory for every decode step.
+        # Previously the full encoder ran at each of the max_len decode steps,
+        # creating ~1 GB of attention intermediates 256 times per batch.
+        src_emb = model.pos_enc(model.src_embed(src))
+        memory = model.encoder(src_emb, src_key_padding_mask=src_key_padding_mask)
+
         for _ in range(max_len):
             tgt_key_padding_mask = tgt.eq(tgt_pad_id)
-            logits = model(
-                src,
-                tgt,
-                src_key_padding_mask=src_key_padding_mask,
+            tgt_len = tgt.size(1)
+            tgt_mask = model.generate_square_subsequent_mask(tgt_len, device)
+            tgt_emb = model.pos_enc(model.tgt_embed(tgt))
+            out = model.decoder(
+                tgt_emb,
+                memory,
+                tgt_mask=tgt_mask,
                 tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
             )
-            next_token = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            next_token = model.fc_out(out)[:, -1, :].argmax(dim=-1, keepdim=True)
             tgt = torch.cat([tgt, next_token], dim=1)
             if (next_token == eos_id).all():
+                break
+
+    return tgt
+
+
+class _GState(Enum):
+    """States of the chopping_star output grammar FSM.
+
+    Grammar (simplified):
+        output       := domain ( STAR domain )* EOS
+        domain       := segments PIPE cath_class
+        segments     := segment ( UNDERSCORE segment )*
+        segment      := DIGITS DASH DIGITS
+        cath_class   := DIGITS ( DOT DIGITS )*
+    """
+    RANGE_START_DIGIT   = auto()  # first digit(s) of a range start  e.g. "2"
+    RANGE_DASH          = auto()  # must emit '-'
+    RANGE_END_DIGIT     = auto()  # digit(s) of range end            e.g. "142"
+    AFTER_RANGE         = auto()  # can emit ' | '(space-pipe-space), '_', ' * ', or EOS
+    SPACE_BEFORE_PIPE   = auto()  # space before '|'
+    PIPE                = auto()  # must emit '|'
+    SPACE_AFTER_PIPE    = auto()  # space after '|'
+    CATH_DIGIT          = auto()  # digit(s) inside a CATH token
+    CATH_DOT_OR_END     = auto()  # can emit '.', ' * ', or EOS
+    SPACE_BEFORE_STAR   = auto()  # space before '*'
+    STAR                = auto()  # must emit '*'
+    SPACE_AFTER_STAR    = auto()  # space after '*'
+    UNDERSCORE          = auto()  # must emit '_'
+
+
+def _build_grammar_mask(
+    state: _GState,
+    token2id: dict,
+    vocab_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return a boolean mask (vocab_size,) where True = token is ALLOWED."""
+    allowed: Set[str] = set()
+
+    digits = set("0123456789")
+
+    if state == _GState.RANGE_START_DIGIT:
+        # Digits of range start, then '-' to begin the end number
+        allowed = digits | {"-"}
+
+    elif state == _GState.RANGE_DASH:
+        allowed = {"-"}
+
+    elif state == _GState.RANGE_END_DIGIT:
+        # Digits of range end, then ' ' (leads to '|') or '_' (discontinuous segment)
+        allowed = digits | {" ", "_"}
+
+    elif state == _GState.AFTER_RANGE:
+        allowed = {" ", "_"}
+
+    elif state == _GState.SPACE_BEFORE_PIPE:
+        allowed = {"|"}
+
+    elif state == _GState.PIPE:
+        allowed = {" "}
+
+    elif state == _GState.SPACE_AFTER_PIPE:
+        # Digits start a CATH class; '-' represents unknown CATH label
+        allowed = digits | {"-"}
+
+    elif state == _GState.CATH_DIGIT:
+        # More CATH digits, '.' between hierarchy levels, or ' ' before ' * ' / EOS
+        allowed = digits | {".", " "}
+
+    elif state == _GState.CATH_DOT_OR_END:
+        allowed = {".", " "}
+
+    elif state == _GState.SPACE_BEFORE_STAR:
+        allowed = {"*"}
+
+    elif state == _GState.STAR:
+        allowed = {" "}
+
+    elif state == _GState.SPACE_AFTER_STAR:
+        allowed = digits
+
+    elif state == _GState.UNDERSCORE:
+        allowed = digits
+
+    mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+    for ch in allowed:
+        if ch in token2id:
+            mask[token2id[ch]] = True
+    return mask
+
+
+def _next_grammar_state(state: _GState, token: str) -> _GState:
+    """Transition the FSM given the emitted token character."""
+
+    digits = set("0123456789")
+
+    if state == _GState.RANGE_START_DIGIT:
+        if token in digits:
+            return _GState.RANGE_START_DIGIT
+        if token == "-":
+            return _GState.RANGE_END_DIGIT
+
+    elif state == _GState.RANGE_END_DIGIT:
+        if token in digits:
+            return _GState.RANGE_END_DIGIT
+        if token == " ":
+            return _GState.SPACE_BEFORE_PIPE
+        if token == "_":
+            return _GState.RANGE_START_DIGIT  # discontinuous next segment
+
+    elif state == _GState.SPACE_BEFORE_PIPE:
+        if token == "|":
+            return _GState.PIPE
+
+    elif state == _GState.PIPE:
+        if token == " ":
+            return _GState.SPACE_AFTER_PIPE
+
+    elif state == _GState.SPACE_AFTER_PIPE:
+        if token in digits:
+            return _GState.CATH_DIGIT
+        if token == "-":
+            # Unknown CATH label represented as '-'; after this only ' * ' or EOS is valid
+            return _GState.CATH_DIGIT
+
+    elif state == _GState.CATH_DIGIT:
+        if token in digits:
+            return _GState.CATH_DIGIT
+        if token == ".":
+            return _GState.CATH_DIGIT  # next level digit follows
+        if token == " ":
+            return _GState.SPACE_BEFORE_STAR
+
+    elif state == _GState.SPACE_BEFORE_STAR:
+        if token == "*":
+            return _GState.STAR
+
+    elif state == _GState.STAR:
+        if token == " ":
+            return _GState.SPACE_AFTER_STAR
+
+    elif state == _GState.SPACE_AFTER_STAR:
+        if token in digits:
+            return _GState.RANGE_START_DIGIT
+
+    # Fallback: stay in current state (should not happen with proper masking)
+    return state
+
+
+def grammar_guided_decode(
+    model: TextToTextTransformer,
+    src: torch.Tensor,
+    src_pad_id: int,
+    tgt_pad_id: int,
+    sos_id: int,
+    eos_id: int,
+    max_len: int,
+    device: torch.device,
+    token2id: dict,
+    id2token: dict,
+) -> torch.Tensor:
+    """Greedy decode with grammar-guided token masking.
+
+    At each step only tokens valid under the chopping_star grammar FSM are
+    allowed.  This guarantees every generated string is parseable.
+
+    Parameters
+    ----------
+    token2id / id2token:
+        The target tokenizer's vocabulary mappings.
+    All other parameters are identical to ``greedy_decode``.
+    """
+    model.eval()
+    src = src.to(device)
+    src_key_padding_mask = src.eq(src_pad_id)
+    vocab_size = len(token2id)
+
+    bsz = src.size(0)
+    tgt = torch.full((bsz, 1), sos_id, dtype=torch.long, device=device)
+
+    # Each sequence in the batch has its own FSM state.
+    states = [_GState.RANGE_START_DIGIT] * bsz
+    finished = [False] * bsz
+
+    with torch.no_grad():
+        # Encode the source sequence ONCE and reuse memory for every decode step.
+        src_emb = model.pos_enc(model.src_embed(src))
+        memory = model.encoder(src_emb, src_key_padding_mask=src_key_padding_mask)
+
+        for _ in range(max_len):
+            tgt_key_padding_mask = tgt.eq(tgt_pad_id)
+            tgt_len = tgt.size(1)
+            tgt_mask = model.generate_square_subsequent_mask(tgt_len, device)
+            tgt_emb = model.pos_enc(model.tgt_embed(tgt))
+            out = model.decoder(
+                tgt_emb,
+                memory,
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                memory_key_padding_mask=src_key_padding_mask,
+            )
+            next_logits = model.fc_out(out)[:, -1, :]  # (bsz, vocab)
+
+            next_tokens = []
+            for b in range(bsz):
+                if finished[b]:
+                    next_tokens.append(eos_id)
+                    continue
+
+                mask = _build_grammar_mask(states[b], token2id, vocab_size, device)
+                if 0 <= eos_id < vocab_size:
+                    mask[eos_id] = True
+
+                row = next_logits[b].clone()
+                row[~mask] = float("-inf")
+
+                chosen = int(row.argmax().item())
+                next_tokens.append(chosen)
+
+                if chosen == eos_id:
+                    finished[b] = True
+                else:
+                    ch = id2token.get(chosen, "")
+                    states[b] = _next_grammar_state(states[b], ch)
+
+            next_token_tensor = torch.tensor(next_tokens, dtype=torch.long, device=device).unsqueeze(1)
+            tgt = torch.cat([tgt, next_token_tensor], dim=1)
+
+            if all(finished):
                 break
 
     return tgt
@@ -72,6 +313,11 @@ def main() -> None:
         type=int,
         default=None,
         help="Maximum generated target length (defaults to checkpoint max_tgt_len).",
+    )
+    parser.add_argument(
+        "--grammar_guided_decoding",
+        action="store_true",
+        help="Use grammar-guided FSM decoding instead of greedy decoding.",
     )
     args = parser.parse_args()
 
@@ -144,17 +390,32 @@ def main() -> None:
             dtype=torch.long,
         ).unsqueeze(0)
 
-        generated_ids = greedy_decode(
-            model,
-            src_tensor,
-            src_pad_id=src_tokenizer.pad_id,
-            tgt_pad_id=tgt_tokenizer.pad_id,
-            sos_id=tgt_tokenizer.sos_id,
-            eos_id=tgt_tokenizer.eos_id,
-            max_len=max_tgt_len,
-            device=device,
-        )[0].tolist()
+        if args.grammar_guided_decoding:
+            generated_ids = grammar_guided_decode(
+                model,
+                src_tensor,
+                src_pad_id=src_tokenizer.pad_id,
+                tgt_pad_id=tgt_tokenizer.pad_id,
+                sos_id=tgt_tokenizer.sos_id,
+                eos_id=tgt_tokenizer.eos_id,
+                max_len=max_tgt_len,
+                device=device,
+                token2id=tgt_tokenizer.token2id,
+                id2token=tgt_tokenizer.id2token,
+            )[0].tolist()
+        else:
+            generated_ids = greedy_decode(
+                model,
+                src_tensor,
+                src_pad_id=src_tokenizer.pad_id,
+                tgt_pad_id=tgt_tokenizer.pad_id,
+                sos_id=tgt_tokenizer.sos_id,
+                eos_id=tgt_tokenizer.eos_id,
+                max_len=max_tgt_len,
+                device=device,
+            )[0].tolist()
 
+        decode_mode = "GRAMMAR-GUIDED" if args.grammar_guided_decoding else "GREEDY"
         pred_text = tgt_tokenizer.decode(generated_ids, strip_special=True)
 
         print("=" * 80)
@@ -162,7 +423,7 @@ def main() -> None:
         print(src_text)
         print("\nTARGET (chopping_star):")
         print(tgt_true)
-        print("\nPREDICTION:")
+        print(f"\nPREDICTION ({decode_mode}):")
         print(pred_text)
 
 

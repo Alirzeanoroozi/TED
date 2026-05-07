@@ -1,0 +1,32 @@
+Weighted sampling enabled: 1291874 samples, weight range [0.1079, 1.0000], alpha=0.2
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/esevinc22/new_TED/TED/lightning_logs exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+┏━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name      ┃ Type                  ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model     │ TextToTextTransformer │  7.4 M │ train │     0 │
+│ 1 │ criterion │ CrossEntropyLoss      │      0 │ train │     0 │
+└───┴───────────┴───────────────────────┴────────┴───────┴───────┘
+Trainable params: 7.4 M
+Non-trainable params: 0
+Total params: 7.4 M
+Total estimated model params size (MB): 29
+Modules in train mode: 107
+Modules in eval mode: 0
+Total FLOPs: 0
+SLURM auto-requeueing enabled. Setting signal handlers.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:434: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=10` in the `DataLoader` to improve performance.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/torch/nn/modules/transformer.py:508: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. We recommend specifying layout=torch.jagged when constructing a nested tensor, as this layout receives active development, has better operator coverage, and works with torch.compile. (Triggered internally at /pytorch/aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:434: The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=10` in the `DataLoader` to improve performance.
+Benchmark eval step 1000: eval_loss=1.2431 | GREEDY  parse_ok=0.71 iou=0.4064 ndo=0.1891 cath=0.0100 cath_lvl=0.1158 bds=0.4077 | GUIDED  parse_ok=0.89 iou=0.3947 cath=0.0200 cath_lvl=0.1158 bds=0.4170
+Benchmark eval step 2000: eval_loss=1.1430 | GREEDY  parse_ok=0.46 iou=0.4238 ndo=0.2846 cath=0.0000 cath_lvl=0.1133 bds=0.4325 | GUIDED  parse_ok=0.95 iou=0.4570 cath=0.0600 cath_lvl=0.1133 bds=0.4421
+Benchmark eval step 3000: eval_loss=1.0904 | GREEDY  parse_ok=0.27 iou=0.3853 ndo=0.4271 cath=0.0000 cath_lvl=0.1110 bds=0.5254 | GUIDED  parse_ok=0.95 iou=0.4529 cath=0.0200 cath_lvl=0.1677 bds=0.4766
+Benchmark eval step 4000: eval_loss=1.0732 | GREEDY  parse_ok=0.93 iou=0.4310 ndo=0.4334 cath=0.0000 cath_lvl=0.1283 bds=0.5105 | GUIDED  parse_ok=0.95 iou=0.5067 cath=0.0600 cath_lvl=0.1567 bds=0.5027
+Benchmark eval step 5000: eval_loss=1.0591 | GREEDY  parse_ok=0.82 iou=0.4903 ndo=0.4526 cath=0.0000 cath_lvl=0.1568 bds=0.4974 | GUIDED  parse_ok=1.00 iou=0.5051 cath=0.0600 cath_lvl=0.1573 bds=0.4922
+Benchmark eval step 6000: eval_loss=1.0335 | GREEDY  parse_ok=0.88 iou=0.4754 ndo=0.4552 cath=0.0100 cath_lvl=0.1368 bds=0.5163 | GUIDED  parse_ok=0.95 iou=0.5084 cath=0.0950 cath_lvl=0.1396 bds=0.5133
+Benchmark eval step 7000: eval_loss=0.9971 | GREEDY  parse_ok=0.88 iou=0.4911 ndo=0.4463 cath=0.0000 cath_lvl=0.1486 bds=0.4732 | GUIDED  parse_ok=0.95 iou=0.5114 cath=0.0900 cath_lvl=0.1492 bds=0.4688
+Benchmark eval step 8000: eval_loss=0.9992 | GREEDY  parse_ok=1.00 iou=0.5176 ndo=0.4979 cath=0.0000 cath_lvl=0.1463 bds=0.5504 | GUIDED  parse_ok=1.00 iou=0.5222 cath=0.0400 cath_lvl=0.1467 bds=0.5479
+Benchmark eval step 9000: eval_loss=0.9844 | GREEDY  parse_ok=0.86 iou=0.4518 ndo=0.3591 cath=0.0000 cath_lvl=0.1482 bds=0.4746 | GUIDED  parse_ok=0.98 iou=0.4655 cath=0.0400 cath_lvl=0.1497 bds=0.4729
+Benchmark eval step 10000: eval_loss=0.9636 | GREEDY  parse_ok=0.97 iou=0.5046 ndo=0.4376 cath=0.0000 cath_lvl=0.1638 bds=0.5640 | GUIDED  parse_ok=0.97 iou=0.5108 cath=0.0800 cath_lvl=0.1688 bds=0.5640

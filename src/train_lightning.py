@@ -1,4 +1,6 @@
+import gc
 import os
+import re
 import sys
 import argparse
 from pathlib import Path
@@ -6,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Sampler, Subset
 from dotenv import load_dotenv
 import wandb
 
@@ -18,7 +20,7 @@ from pytorch_lightning.utilities.rank_zero import rank_zero_info
 from data.dataset_ import collate_fn, create_train_val_test_datasets, _load_paths
 from tokenizer_ import TextTokenizer
 from model import TextToTextTransformer
-from evaluate import greedy_decode
+from evaluate import greedy_decode, grammar_guided_decode
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -52,6 +54,91 @@ def resolve_parquet_inputs(data_parquet_path: str) -> list[str]:
     return parquet_files
 
 
+_CATH_RE = re.compile(r"\|\s*([\d.]+)")
+
+
+def _extract_cath_labels(chopping_star: str) -> list:
+    """Return all CATH class labels found in a chopping_star string."""
+    return _CATH_RE.findall(chopping_star)
+
+
+def _build_sample_weights(
+    train_df,
+    alpha: float = 0.2,
+) -> torch.Tensor:
+    """Compute per-sample WeightedRandomSampler weights.
+
+    Strategy: weight = 1 / freq^alpha, where alpha controls smoothing strength.
+
+        alpha=0.0  ->  uniform sampling (no rebalancing)
+        alpha=0.1  ->  ~3x max oversampling of rarest vs most common class
+        alpha=0.2  ->  ~8x max oversampling  (recommended default)
+        alpha=0.5  ->  ~184x (old sqrt formula, too aggressive)
+
+    Using the rarest CATH label in a chain to set the chain's weight means
+    multi-domain chains containing a rare domain get boosted — the target
+    behaviour for improving rare-class coverage.
+
+    For samples with no parseable CATH label (unknown domains), assign the
+    median weight so they are sampled at the average rate.
+    """
+    chopping_stars = train_df["chopping_star"].astype(str).tolist()
+
+    # Count frequency of every CATH label across the whole training set.
+    freq: dict = {}
+    for cs in chopping_stars:
+        for label in _extract_cath_labels(cs):
+            freq[label] = freq.get(label, 0) + 1
+
+    raw_weights = []
+    for cs in chopping_stars:
+        labels = _extract_cath_labels(cs)
+        if labels:
+            rarest_freq = min(freq[lbl] for lbl in labels)
+            raw_weights.append(1.0 / (rarest_freq ** alpha))
+        else:
+            raw_weights.append(None)  # placeholder; filled below
+
+    # Fill unknowns with median of the known weights.
+    known = [w for w in raw_weights if w is not None]
+    median_w = float(np.median(known)) if known else 1.0
+    raw_weights = [w if w is not None else median_w for w in raw_weights]
+
+    weights = torch.tensor(raw_weights, dtype=torch.float)
+    return weights
+
+
+class _StreamingWeightedSampler(Sampler):
+    """Memory-efficient weighted sampler.
+
+    PyTorch's built-in WeightedRandomSampler calls .tolist() on a tensor of
+    `num_samples` indices all at once, creating a ~46 MB Python list (28 bytes
+    per int × 1.29 M samples) that lives in RAM for the entire epoch.  It also
+    coerces the weights to float64 internally, doubling their footprint.
+
+    This sampler generates indices in small chunks so the peak extra allocation
+    is proportional to `chunk_size` (default 8 192 ≈ 230 KB), not to the full
+    epoch length.
+    """
+
+    def __init__(self, weights: torch.Tensor, num_samples: int, chunk_size: int = 8192):
+        self.weights = weights.float()  # keep as float32, not float64
+        self.num_samples = num_samples
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        remaining = self.num_samples
+        while remaining > 0:
+            n = min(self.chunk_size, remaining)
+            chunk = torch.multinomial(self.weights, n, replacement=True)
+            yield from chunk.tolist()
+            del chunk
+            remaining -= n
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+
 class TEDDataModule(pl.LightningDataModule):
     def __init__(
         self,
@@ -63,6 +150,8 @@ class TEDDataModule(pl.LightningDataModule):
         benchmark_eval_subset_size: int = 100,
         benchmark_eval_fixed_subset: bool = True,
         benchmark_eval_seed: int = 42,
+        weighted_sampling: bool = False,
+        sampling_alpha: float = 0.2,
     ):
         super().__init__()
         self.data_parquet_folder = data_parquet_folder
@@ -73,6 +162,8 @@ class TEDDataModule(pl.LightningDataModule):
         self.benchmark_eval_subset_size = benchmark_eval_subset_size
         self.benchmark_eval_fixed_subset = benchmark_eval_fixed_subset
         self.benchmark_eval_seed = benchmark_eval_seed
+        self.weighted_sampling = weighted_sampling
+        self.sampling_alpha = sampling_alpha
         self.src_tokenizer = None
         self.tgt_tokenizer = None
         self.train_dataset = None
@@ -80,8 +171,14 @@ class TEDDataModule(pl.LightningDataModule):
         self.test_dataset = None
         self.benchmark_val_subset = None
         self._benchmark_subset_calls = 0
+        self._train_sample_weights = None
 
     def setup(self, stage: str | None = None):
+        if self.train_dataset is not None:
+            # Already set up (e.g. explicit call in main() before trainer.fit()).
+            # PL calls setup() again internally; skip to avoid loading all
+            # parquet files and recomputing sample weights a second time.
+            return
         parquet_files = resolve_parquet_inputs(self.data_parquet_folder)
         # Fit tokenizers on a subset of data (same columns as dataset: sequence, chopping_star)
         df = _load_paths(parquet_files[:3] if len(parquet_files) >= 3 else parquet_files)
@@ -94,6 +191,18 @@ class TEDDataModule(pl.LightningDataModule):
             self.max_src_len,
             self.max_tgt_len,
         )
+
+        if self.weighted_sampling and self.train_dataset is not None:
+            self._train_sample_weights = _build_sample_weights(
+                self.train_dataset.df,
+                alpha=self.sampling_alpha,
+            )
+            rank_zero_info(
+                f"Weighted sampling enabled: {len(self._train_sample_weights)} samples, "
+                f"weight range [{self._train_sample_weights.min():.4f}, "
+                f"{self._train_sample_weights.max():.4f}], "
+                f"alpha={self.sampling_alpha}"
+            )
 
         if self.val_dataset is not None and len(self.val_dataset) > 0:
             self.benchmark_val_subset = Subset(self.val_dataset, self._select_benchmark_indices())
@@ -112,17 +221,24 @@ class TEDDataModule(pl.LightningDataModule):
         indices = torch.randperm(len(self.val_dataset), generator=generator)[:subset_size].tolist()
         return indices
 
-    def _build_loader(self, dataset, shuffle: bool):
+    def _build_loader(self, dataset, shuffle: bool, sampler=None):
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             collate_fn=lambda b: collate_fn(b, self.src_tokenizer.pad_id, self.tgt_tokenizer.pad_id),
             num_workers=self.num_workers,
-            pin_memory=True,
+            pin_memory=(self.num_workers > 0),  # pinning is only beneficial with background workers
         )
 
     def train_dataloader(self):
+        if self.weighted_sampling and self._train_sample_weights is not None:
+            sampler = _StreamingWeightedSampler(
+                weights=self._train_sample_weights,
+                num_samples=len(self._train_sample_weights),
+            )
+            return self._build_loader(self.train_dataset, shuffle=False, sampler=sampler)
         return self._build_loader(self.train_dataset, shuffle=True)
 
     def val_dataloader(self):
@@ -154,10 +270,12 @@ class TEDLightningModule(pl.LightningModule):
         weight_decay: float = 0.01,
         max_grad_norm: float = 1.0,
         benchmark_num_logged_samples: int = 5,
+        grammar_guided_decoding: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["tgt_pad_id"])
         self.tgt_pad_id = tgt_pad_id
+        self.grammar_guided_decoding = grammar_guided_decoding
         self.model = TextToTextTransformer(
             src_vocab_size=src_vocab_size,
             tgt_vocab_size=tgt_vocab_size,
@@ -219,55 +337,189 @@ class TEDLightningModule(pl.LightningModule):
             return float("nan")
         return float(np.nanmean(values))
 
-    def _build_benchmark_samples_table(self, sample_rows):
-        if not sample_rows:
+    def _run_single_decode_pass(self, dataloader, use_grammar_guided: bool):
+        """One full decode pass over `dataloader`.
+
+        Returns a raw dict of accumulated data — not yet averaged.
+        Caller must call self.eval() / torch.no_grad() before calling this.
+        """
+        src_pad_id = self.trainer.datamodule.src_tokenizer.pad_id
+        tgt_pad_id = self.trainer.datamodule.tgt_tokenizer.pad_id
+        tgt_tokenizer = self.trainer.datamodule.tgt_tokenizer
+        max_logged_samples = max(0, int(self.hparams.benchmark_num_logged_samples))
+
+        metric_values = {
+            "iou_chain": [], "ndo": [], "correct_prop": [],
+            "correct_cath": [], "cath_level_score": [], "boundary_distance_score": [],
+        }
+        loss_sum = 0.0
+        item_count = 0
+        sample_rows = []
+        gt_parse_ok_count = 0
+        pred_parse_ok_count = 0
+        domain_count_match_count = 0
+        gt_truncated_for_model_count = 0
+
+        for batch in dataloader:
+            batch = self._move_batch_to_device(batch)
+            batch_size = batch["src"].size(0)
+            loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
+            loss_sum += float(loss.detach().cpu()) * batch_size
+            item_count += batch_size
+
+            if use_grammar_guided:
+                generated_ids = grammar_guided_decode(
+                    self.model, batch["src"],
+                    src_pad_id=src_pad_id, tgt_pad_id=tgt_pad_id,
+                    sos_id=tgt_tokenizer.sos_id, eos_id=tgt_tokenizer.eos_id,
+                    max_len=self.hparams.max_tgt_len, device=self.device,
+                    token2id=tgt_tokenizer.token2id, id2token=tgt_tokenizer.id2token,
+                )
+            else:
+                generated_ids = greedy_decode(
+                    self.model, batch["src"],
+                    src_pad_id=src_pad_id, tgt_pad_id=tgt_pad_id,
+                    sos_id=tgt_tokenizer.sos_id, eos_id=tgt_tokenizer.eos_id,
+                    max_len=self.hparams.max_tgt_len, device=self.device,
+                )
+
+            predictions = [
+                tgt_tokenizer.decode(row.tolist(), strip_special=True)
+                for row in generated_ids.detach().cpu()
+            ]
+            del generated_ids  # free GPU tensor immediately; don't wait for Python GC
+
+            # Cache src/tgt text fields before releasing the batch GPU tensors.
+            src_texts = batch["src_text"]
+            tgt_texts = batch["tgt_text"]
+            tgt_texts_model = batch["tgt_text_model"]
+            tgt_was_truncated_list = batch["tgt_was_truncated"]
+            del batch  # release GPU tensors (src, tgt_in, tgt_out) back to CUDA cache
+
+            for src_text, tgt_text, tgt_text_model, tgt_was_truncated, pred_text in zip(
+                src_texts, tgt_texts, tgt_texts_model,
+                tgt_was_truncated_list, predictions,
+            ):
+                metrics = evaluate_target(
+                    tgt_text, pred_text,
+                    nres=len(src_text), sequence=src_text,
+                    config=self.benchmark_eval_config,
+                )
+                metric_values["iou_chain"].append(float(metrics["iou_chain"]))
+                metric_values["ndo"].append(float(metrics["ndo"]))
+                metric_values["correct_prop"].append(float(metrics["correct_prop"]))
+                metric_values["correct_cath"].append(float(metrics["correct_cath"]))
+                metric_values["cath_level_score"].append(float(metrics["cath_level_score"]))
+                metric_values["boundary_distance_score"].append(float(metrics["boundary_distance_score"]))
+                gt_parse_ok_count += int(bool(metrics["gt_parse_ok"]))
+                pred_parse_ok_count += int(bool(metrics["pred_parse_ok"]))
+                domain_count_match_count += int(bool(metrics["domain_count_match"]))
+                gt_truncated_for_model_count += int(bool(tgt_was_truncated))
+
+                if len(sample_rows) < max_logged_samples:
+                    sample_rows.append({
+                        "input_sequence": src_text,
+                        "target_chopping_star": tgt_text,
+                        "target_chopping_star_model": tgt_text_model,
+                        "target_truncated_for_model": bool(tgt_was_truncated),
+                        "predicted_chopping_star": pred_text,
+                        "gt_parse_ok": bool(metrics["gt_parse_ok"]),
+                        "pred_parse_ok": bool(metrics["pred_parse_ok"]),
+                        "gt_parse_errors": metrics["gt_parse_errors"],
+                        "pred_parse_errors": metrics["pred_parse_errors"],
+                        "gt_parse_warnings": metrics["gt_parse_warnings"],
+                        "pred_parse_warnings": metrics["pred_parse_warnings"],
+                        "gt_domain_count": int(metrics["gt_domain_count"]),
+                        "pred_domain_count": int(metrics["pred_domain_count"]),
+                        "domain_count_match": bool(metrics["domain_count_match"]),
+                        "iou_chain": float(metrics["iou_chain"]),
+                        "ndo": float(metrics["ndo"]),
+                        "correct_prop": float(metrics["correct_prop"]),
+                        "correct_cath": float(metrics["correct_cath"]),
+                        "cath_level_score": float(metrics["cath_level_score"]),
+                        "boundary_distance_score": float(metrics["boundary_distance_score"]),
+                    })
+
+        return {
+            "metric_values": metric_values,
+            "loss_sum": loss_sum,
+            "item_count": item_count,
+            "sample_rows": sample_rows,
+            "gt_parse_ok_count": gt_parse_ok_count,
+            "pred_parse_ok_count": pred_parse_ok_count,
+            "domain_count_match_count": domain_count_match_count,
+            "gt_truncated_for_model_count": gt_truncated_for_model_count,
+        }
+
+    def _summarize_pass(self, raw: dict) -> dict:
+        """Average the raw accumulated data from one decode pass."""
+        n = raw["item_count"]
+        mv = raw["metric_values"]
+        return {
+            "eval_loss": raw["loss_sum"] / n,
+            "iou_chain": self._mean_metric(mv["iou_chain"]),
+            "ndo": self._mean_metric(mv["ndo"]),
+            "correct_prop": self._mean_metric(mv["correct_prop"]),
+            "correct_cath": self._mean_metric(mv["correct_cath"]),
+            "cath_level_score": self._mean_metric(mv["cath_level_score"]),
+            "boundary_distance_score": self._mean_metric(mv["boundary_distance_score"]),
+            "gt_parse_ok_rate": raw["gt_parse_ok_count"] / n,
+            "pred_parse_ok_rate": raw["pred_parse_ok_count"] / n,
+            "domain_count_match_rate": raw["domain_count_match_count"] / n,
+            "target_truncated_for_model_rate": raw["gt_truncated_for_model_count"] / n,
+        }
+
+    def _build_samples_table(self, greedy_rows, guided_rows=None):
+        """Build a W&B table.
+
+        When guided_rows is provided the table shows greedy and guided
+        predictions side-by-side so the PI can compare them directly.
+        """
+        if not greedy_rows:
             return None
 
-        table = wandb.Table(
-            columns=[
-                "input_sequence",
-                "target_chopping_star",
-                "target_chopping_star_model",
-                "target_truncated_for_model",
-                "predicted_chopping_star",
-                "gt_parse_ok",
-                "pred_parse_ok",
-                "gt_parse_errors",
-                "pred_parse_errors",
-                "gt_parse_warnings",
-                "pred_parse_warnings",
-                "gt_domain_count",
-                "pred_domain_count",
-                "domain_count_match",
-                "iou_chain",
-                "ndo",
-                "correct_prop",
-                "correct_cath",
-                "boundary_distance_score",
+        base_cols = [
+            "input_sequence", "target_chopping_star", "target_chopping_star_model",
+            "target_truncated_for_model", "gt_parse_ok",
+            "gt_domain_count", "gt_parse_errors",
+        ]
+        greedy_cols = [
+            "greedy_predicted", "greedy_parse_ok", "greedy_domain_count",
+            "greedy_iou_chain", "greedy_ndo", "greedy_correct_prop",
+            "greedy_correct_cath", "greedy_cath_level_score", "greedy_boundary_distance_score",
+        ]
+        guided_cols = [
+            "guided_predicted", "guided_parse_ok", "guided_domain_count",
+            "guided_iou_chain", "guided_ndo", "guided_correct_prop",
+            "guided_correct_cath", "guided_cath_level_score", "guided_boundary_distance_score",
+        ] if guided_rows else []
+
+        table = wandb.Table(columns=base_cols + greedy_cols + guided_cols)
+
+        for i, g_row in enumerate(greedy_rows):
+            base = [
+                g_row["input_sequence"], g_row["target_chopping_star"],
+                g_row["target_chopping_star_model"], g_row["target_truncated_for_model"],
+                g_row["gt_parse_ok"], g_row["gt_domain_count"], g_row["gt_parse_errors"],
             ]
-        )
-        for sample in sample_rows:
-            table.add_data(
-                sample["input_sequence"],
-                sample["target_chopping_star"],
-                sample["target_chopping_star_model"],
-                sample["target_truncated_for_model"],
-                sample["predicted_chopping_star"],
-                sample["gt_parse_ok"],
-                sample["pred_parse_ok"],
-                sample["gt_parse_errors"],
-                sample["pred_parse_errors"],
-                sample["gt_parse_warnings"],
-                sample["pred_parse_warnings"],
-                sample["gt_domain_count"],
-                sample["pred_domain_count"],
-                sample["domain_count_match"],
-                sample["iou_chain"],
-                sample["ndo"],
-                sample["correct_prop"],
-                sample["correct_cath"],
-                sample["boundary_distance_score"],
-            )
+            greedy = [
+                g_row["predicted_chopping_star"], g_row["pred_parse_ok"],
+                g_row["pred_domain_count"], g_row["iou_chain"], g_row["ndo"],
+                g_row["correct_prop"], g_row["correct_cath"],
+                g_row["cath_level_score"], g_row["boundary_distance_score"],
+            ]
+            if guided_rows and i < len(guided_rows):
+                gu_row = guided_rows[i]
+                guided = [
+                    gu_row["predicted_chopping_star"], gu_row["pred_parse_ok"],
+                    gu_row["pred_domain_count"], gu_row["iou_chain"], gu_row["ndo"],
+                    gu_row["correct_prop"], gu_row["correct_cath"],
+                    gu_row["cath_level_score"], gu_row["boundary_distance_score"],
+                ]
+            else:
+                guided = []
+            table.add_data(*(base + greedy + guided))
+
         return table
 
     def run_benchmark_evaluation(self, dataloader=None):
@@ -276,120 +528,73 @@ class TEDLightningModule(pl.LightningModule):
         if dataloader is None:
             return None
 
-        src_pad_id = datamodule.src_tokenizer.pad_id
-        tgt_pad_id = datamodule.tgt_tokenizer.pad_id
-        tgt_tokenizer = datamodule.tgt_tokenizer
         was_training = self.training
-        metric_values = {
-            "iou_chain": [],
-            "ndo": [],
-            "correct_prop": [],
-            "correct_cath": [],
-            "boundary_distance_score": [],
-        }
-        loss_sum = 0.0
-        item_count = 0
-        sample_rows = []
-        max_logged_samples = max(0, int(self.hparams.benchmark_num_logged_samples))
-        gt_parse_ok_count = 0
-        pred_parse_ok_count = 0
-        domain_count_match_count = 0
-        gt_truncated_for_model_count = 0
-
         self.eval()
+
         with torch.no_grad():
-            for batch in dataloader:
-                batch = self._move_batch_to_device(batch)
-                batch_size = batch["src"].size(0)
-                loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
-                loss_sum += float(loss.detach().cpu()) * batch_size
-                item_count += batch_size
+            # Greedy decoding — always run, gives baseline metrics.
+            greedy_raw = self._run_single_decode_pass(dataloader, use_grammar_guided=False)
 
-                generated_ids = greedy_decode(
-                    self.model,
-                    batch["src"],
-                    src_pad_id=src_pad_id,
-                    tgt_pad_id=tgt_pad_id,
-                    sos_id=tgt_tokenizer.sos_id,
-                    eos_id=tgt_tokenizer.eos_id,
-                    max_len=self.hparams.max_tgt_len,
-                    device=self.device,
-                )
-
-                predictions = [
-                    tgt_tokenizer.decode(row.tolist(), strip_special=True)
-                    for row in generated_ids.detach().cpu()
-                ]
-
-                for src_text, tgt_text, tgt_text_model, tgt_was_truncated, pred_text in zip(
-                    batch["src_text"],
-                    batch["tgt_text"],
-                    batch["tgt_text_model"],
-                    batch["tgt_was_truncated"],
-                    predictions,
-                ):
-                    metrics = evaluate_target(
-                        tgt_text,
-                        pred_text,
-                        nres=len(src_text),
-                        sequence=src_text,
-                        config=self.benchmark_eval_config,
-                    )
-                    metric_values["iou_chain"].append(float(metrics["iou_chain"]))
-                    metric_values["ndo"].append(float(metrics["ndo"]))
-                    metric_values["correct_prop"].append(float(metrics["correct_prop"]))
-                    metric_values["correct_cath"].append(float(metrics["correct_cath"]))
-                    metric_values["boundary_distance_score"].append(float(metrics["boundary_distance_score"]))
-                    gt_parse_ok_count += int(bool(metrics["gt_parse_ok"]))
-                    pred_parse_ok_count += int(bool(metrics["pred_parse_ok"]))
-                    domain_count_match_count += int(bool(metrics["domain_count_match"]))
-                    gt_truncated_for_model_count += int(bool(tgt_was_truncated))
-
-                    if len(sample_rows) < max_logged_samples:
-                        sample_rows.append(
-                            {
-                                "input_sequence": src_text,
-                                "target_chopping_star": tgt_text,
-                                "target_chopping_star_model": tgt_text_model,
-                                "target_truncated_for_model": bool(tgt_was_truncated),
-                                "predicted_chopping_star": pred_text,
-                                "gt_parse_ok": bool(metrics["gt_parse_ok"]),
-                                "pred_parse_ok": bool(metrics["pred_parse_ok"]),
-                                "gt_parse_errors": metrics["gt_parse_errors"],
-                                "pred_parse_errors": metrics["pred_parse_errors"],
-                                "gt_parse_warnings": metrics["gt_parse_warnings"],
-                                "pred_parse_warnings": metrics["pred_parse_warnings"],
-                                "gt_domain_count": int(metrics["gt_domain_count"]),
-                                "pred_domain_count": int(metrics["pred_domain_count"]),
-                                "domain_count_match": bool(metrics["domain_count_match"]),
-                                "iou_chain": float(metrics["iou_chain"]),
-                                "ndo": float(metrics["ndo"]),
-                                "correct_prop": float(metrics["correct_prop"]),
-                                "correct_cath": float(metrics["correct_cath"]),
-                                "boundary_distance_score": float(metrics["boundary_distance_score"]),
-                            }
-                        )
+            # Grammar-guided decoding — run alongside greedy when the flag is set
+            # so both sets of metrics appear in W&B for direct comparison.
+            guided_raw = None
+            if self.grammar_guided_decoding:
+                guided_raw = self._run_single_decode_pass(dataloader, use_grammar_guided=True)
 
         if was_training:
             self.train()
 
-        if item_count == 0:
+        if greedy_raw["item_count"] == 0:
             return None
 
-        return {
-            "eval_loss": loss_sum / item_count,
-            "val_subset_eval_loss": loss_sum / item_count,
-            "val_subset_iou_chain": self._mean_metric(metric_values["iou_chain"]),
-            "val_subset_ndo": self._mean_metric(metric_values["ndo"]),
-            "val_subset_correct_prop": self._mean_metric(metric_values["correct_prop"]),
-            "val_subset_correct_cath": self._mean_metric(metric_values["correct_cath"]),
-            "val_subset_boundary_distance_score": self._mean_metric(metric_values["boundary_distance_score"]),
-            "val_subset_gt_parse_ok_rate": gt_parse_ok_count / item_count,
-            "val_subset_pred_parse_ok_rate": pred_parse_ok_count / item_count,
-            "val_subset_domain_count_match_rate": domain_count_match_count / item_count,
-            "val_subset_target_truncated_for_model_rate": gt_truncated_for_model_count / item_count,
-            "benchmark_samples_table": self._build_benchmark_samples_table(sample_rows),
+        g = self._summarize_pass(greedy_raw)
+
+        out = {
+            # Shared loss and truncation (same regardless of decode strategy)
+            "eval_loss": g["eval_loss"],
+            "val_subset_eval_loss": g["eval_loss"],
+            "val_subset_gt_parse_ok_rate": g["gt_parse_ok_rate"],
+            "val_subset_target_truncated_for_model_rate": g["target_truncated_for_model_rate"],
+            # Greedy metrics — kept under both the original names (W&B backward compat)
+            # and explicit greedy-prefixed names.
+            "val_subset_iou_chain": g["iou_chain"],
+            "val_subset_ndo": g["ndo"],
+            "val_subset_correct_prop": g["correct_prop"],
+            "val_subset_correct_cath": g["correct_cath"],
+            "val_subset_cath_level_score": g["cath_level_score"],
+            "val_subset_boundary_distance_score": g["boundary_distance_score"],
+            "val_subset_pred_parse_ok_rate": g["pred_parse_ok_rate"],
+            "val_subset_domain_count_match_rate": g["domain_count_match_rate"],
+            # Explicit greedy prefix — shown alongside guided in W&B
+            "val_subset_greedy_iou_chain": g["iou_chain"],
+            "val_subset_greedy_ndo": g["ndo"],
+            "val_subset_greedy_correct_prop": g["correct_prop"],
+            "val_subset_greedy_correct_cath": g["correct_cath"],
+            "val_subset_greedy_cath_level_score": g["cath_level_score"],
+            "val_subset_greedy_boundary_distance_score": g["boundary_distance_score"],
+            "val_subset_greedy_pred_parse_ok_rate": g["pred_parse_ok_rate"],
         }
+
+        if guided_raw is not None and guided_raw["item_count"] > 0:
+            gu = self._summarize_pass(guided_raw)
+            out.update({
+                "val_subset_guided_iou_chain": gu["iou_chain"],
+                "val_subset_guided_ndo": gu["ndo"],
+                "val_subset_guided_correct_prop": gu["correct_prop"],
+                "val_subset_guided_correct_cath": gu["correct_cath"],
+                "val_subset_guided_cath_level_score": gu["cath_level_score"],
+                "val_subset_guided_boundary_distance_score": gu["boundary_distance_score"],
+                "val_subset_guided_pred_parse_ok_rate": gu["pred_parse_ok_rate"],
+            })
+            out["benchmark_samples_table"] = self._build_samples_table(
+                greedy_raw["sample_rows"], guided_raw["sample_rows"]
+            )
+        else:
+            out["benchmark_samples_table"] = self._build_samples_table(
+                greedy_raw["sample_rows"]
+            )
+
+        return out
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -425,17 +630,31 @@ class PeriodicBenchmarkEvalCallback(Callback):
                 trainer.logger.log_metrics(metrics, step=global_step)
                 if sample_table is not None and isinstance(trainer.logger, WandbLogger):
                     trainer.logger.experiment.log({"benchmark_samples": sample_table}, step=global_step)
-                rank_zero_info(
-                    "Benchmark eval step "
-                    f"{global_step}: eval_loss={metrics['eval_loss']:.4f}, "
-                    f"iou_chain={metrics['val_subset_iou_chain']:.4f}, "
-                    f"ndo={metrics['val_subset_ndo']:.4f}, "
-                    f"correct_prop={metrics['val_subset_correct_prop']:.4f}, "
-                    f"correct_cath={metrics['val_subset_correct_cath']:.4f}, "
-                    f"boundary_distance_score={metrics['val_subset_boundary_distance_score']:.4f}, "
-                    f"pred_parse_ok_rate={metrics['val_subset_pred_parse_ok_rate']:.4f}, "
-                    f"target_truncated_for_model_rate={metrics['val_subset_target_truncated_for_model_rate']:.4f}"
+                log_msg = (
+                    f"Benchmark eval step {global_step}: "
+                    f"eval_loss={metrics['eval_loss']:.4f} | "
+                    f"GREEDY  parse_ok={metrics['val_subset_greedy_pred_parse_ok_rate']:.2f} "
+                    f"iou={metrics['val_subset_greedy_iou_chain']:.4f} "
+                    f"ndo={metrics['val_subset_ndo']:.4f} "
+                    f"cath={metrics['val_subset_greedy_correct_cath']:.4f} "
+                    f"cath_lvl={metrics['val_subset_greedy_cath_level_score']:.4f} "
+                    f"bds={metrics['val_subset_greedy_boundary_distance_score']:.4f}"
                 )
+                if "val_subset_guided_iou_chain" in metrics:
+                    log_msg += (
+                        f" | GUIDED  parse_ok={metrics['val_subset_guided_pred_parse_ok_rate']:.2f} "
+                        f"iou={metrics['val_subset_guided_iou_chain']:.4f} "
+                        f"cath={metrics['val_subset_guided_correct_cath']:.4f} "
+                        f"cath_lvl={metrics['val_subset_guided_cath_level_score']:.4f} "
+                        f"bds={metrics['val_subset_guided_boundary_distance_score']:.4f}"
+                    )
+                rank_zero_info(log_msg)
+
+                # Explicitly release the table and metrics dict so wandb doesn't
+                # accumulate all logged tables in memory across 100+ eval steps.
+                del sample_table, metrics
+                gc.collect()
+                torch.cuda.empty_cache()  # return fragmented cached CUDA memory to the pool
 
         if trainer.strategy is not None:
             trainer.strategy.barrier("benchmark_eval_end")
@@ -481,6 +700,29 @@ def main():
         action="store_true",
         help="Resample the validation benchmark subset on each periodic evaluation instead of reusing a fixed subset",
     )
+    parser.add_argument(
+        "--weighted_sampling",
+        action="store_true",
+        help="Use WeightedRandomSampler to oversample rare CATH labels during training",
+    )
+    parser.add_argument(
+        "--sampling_alpha",
+        type=float,
+        default=0.2,
+        help="Exponent for frequency-based sampling weights: weight = 1/freq^alpha. "
+             "0=uniform, 0.1=~3x max boost, 0.2=~8x max boost (default: 0.2)",
+    )
+    parser.add_argument(
+        "--grammar_guided_decoding",
+        action="store_true",
+        help="Use grammar-guided FSM decoding during benchmark evaluation (guarantees parseable output)",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to a Lightning .ckpt file to resume training from (model + optimizer + epoch state).",
+    )
     args = parser.parse_args()
 
     if args.accelerator == "gpu":
@@ -505,6 +747,8 @@ def main():
         benchmark_eval_subset_size=args.benchmark_eval_subset_size,
         benchmark_eval_fixed_subset=not args.benchmark_eval_random_subset,
         benchmark_eval_seed=args.benchmark_eval_seed,
+        weighted_sampling=args.weighted_sampling,
+        sampling_alpha=args.sampling_alpha,
     )
 
     dm.setup()
@@ -524,6 +768,7 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
         benchmark_num_logged_samples=args.benchmark_num_logged_samples,
+        grammar_guided_decoding=args.grammar_guided_decoding,
     )
 
     load_dotenv()
@@ -560,7 +805,7 @@ def main():
         gradient_clip_val=args.max_grad_norm,
     )
 
-    trainer.fit(model, datamodule=dm)
+    trainer.fit(model, datamodule=dm, ckpt_path=args.resume_from_checkpoint)
 
     if args.save_path and trainer.is_global_zero:
         torch.save(

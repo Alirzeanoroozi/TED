@@ -1,0 +1,128 @@
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/esevinc22/new_TED/TED/lightning_logs exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+┏━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name      ┃ Type                  ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model     │ TextToTextTransformer │  7.4 M │ train │     0 │
+│ 1 │ criterion │ CrossEntropyLoss      │      0 │ train │     0 │
+└───┴───────────┴───────────────────────┴────────┴───────┴───────┘
+Trainable params: 7.4 M
+Non-trainable params: 0
+Total params: 7.4 M
+Total estimated model params size (MB): 29
+Modules in train mode: 107
+Modules in eval mode: 0
+Total FLOPs: 0
+SLURM auto-requeueing enabled. Setting signal handlers.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/torch/nn/modules/transformer.py:508: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. We recommend specifying layout=torch.jagged when constructing a nested tensor, as this layout receives active development, has better operator coverage, and works with torch.compile. (Triggered internally at /pytorch/aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+Benchmark eval step 1000: eval_loss=1.2539 | GREEDY  parse_ok=0.74 iou=0.2778 ndo=-0.0144 cath=0.0000 cath_lvl=0.1096 bds=0.4678
+Benchmark eval step 2000: eval_loss=1.1208 | GREEDY  parse_ok=0.89 iou=0.4577 ndo=0.3010 cath=0.0000 cath_lvl=0.1605 bds=0.4516
+Benchmark eval step 3000: eval_loss=1.0816 | GREEDY  parse_ok=0.96 iou=0.4814 ndo=0.3803 cath=0.0150 cath_lvl=0.1496 bds=0.4540
+Benchmark eval step 4000: eval_loss=1.0656 | GREEDY  parse_ok=0.99 iou=0.4587 ndo=0.4093 cath=0.0000 cath_lvl=0.1360 bds=0.4743
+Benchmark eval step 5000: eval_loss=1.0292 | GREEDY  parse_ok=0.83 iou=0.4180 ndo=0.4522 cath=0.0100 cath_lvl=0.1238 bds=0.4942
+Benchmark eval step 6000: eval_loss=1.0064 | GREEDY  parse_ok=0.85 iou=0.4667 ndo=0.3928 cath=0.0000 cath_lvl=0.1759 bds=0.5074
+Benchmark eval step 7000: eval_loss=0.9967 | GREEDY  parse_ok=0.97 iou=0.4770 ndo=0.4718 cath=0.0000 cath_lvl=0.1527 bds=0.5389
+Benchmark eval step 8000: eval_loss=0.9796 | GREEDY  parse_ok=0.95 iou=0.4927 ndo=0.4160 cath=0.0000 cath_lvl=0.1627 bds=0.5135
+Benchmark eval step 9000: eval_loss=0.9672 | GREEDY  parse_ok=0.67 iou=0.4669 ndo=0.4792 cath=0.0033 cath_lvl=0.1699 bds=0.5287
+Benchmark eval step 10000: eval_loss=0.9495 | GREEDY  parse_ok=0.90 iou=0.5136 ndo=0.4603 cath=0.0000 cath_lvl=0.1785 bds=0.5086
+Benchmark eval step 11000: eval_loss=0.9243 | GREEDY  parse_ok=0.84 iou=0.4050 ndo=0.4302 cath=0.0000 cath_lvl=0.1426 bds=0.5431
+Benchmark eval step 12000: eval_loss=0.9266 | GREEDY  parse_ok=0.74 iou=0.3657 ndo=0.4659 cath=0.0000 cath_lvl=0.1360 bds=0.5593
+Benchmark eval step 13000: eval_loss=0.9137 | GREEDY  parse_ok=0.70 iou=0.4033 ndo=0.4632 cath=0.0000 cath_lvl=0.1293 bds=0.5296
+Benchmark eval step 14000: eval_loss=0.8998 | GREEDY  parse_ok=0.80 iou=0.4895 ndo=0.4646 cath=0.0033 cath_lvl=0.1383 bds=0.5549
+Benchmark eval step 15000: eval_loss=0.8820 | GREEDY  parse_ok=0.80 iou=0.4347 ndo=0.5084 cath=0.0000 cath_lvl=0.1448 bds=0.5919
+Benchmark eval step 16000: eval_loss=0.8817 | GREEDY  parse_ok=0.67 iou=0.4444 ndo=0.4712 cath=0.0075 cath_lvl=0.1386 bds=0.5628
+Benchmark eval step 17000: eval_loss=0.8709 | GREEDY  parse_ok=0.73 iou=0.4647 ndo=0.5387 cath=0.0000 cath_lvl=0.1600 bds=0.5809
+Benchmark eval step 18000: eval_loss=0.8629 | GREEDY  parse_ok=0.79 iou=0.4109 ndo=0.5171 cath=0.0050 cath_lvl=0.1482 bds=0.5833
+Benchmark eval step 19000: eval_loss=0.8516 | GREEDY  parse_ok=0.42 iou=0.3380 ndo=0.4990 cath=0.0070 cath_lvl=0.1038 bds=0.5446
+Benchmark eval step 20000: eval_loss=0.8525 | GREEDY  parse_ok=0.71 iou=0.3943 ndo=0.4912 cath=0.0076 cath_lvl=0.0927 bds=0.6045
+Benchmark eval step 21000: eval_loss=0.8365 | GREEDY  parse_ok=0.58 iou=0.4984 ndo=0.5113 cath=0.0092 cath_lvl=0.1404 bds=0.5882
+Benchmark eval step 22000: eval_loss=0.8365 | GREEDY  parse_ok=0.47 iou=0.4011 ndo=0.5120 cath=0.0045 cath_lvl=0.1371 bds=0.5978
+Benchmark eval step 23000: eval_loss=0.8279 | GREEDY  parse_ok=0.47 iou=0.4283 ndo=0.5189 cath=0.0040 cath_lvl=0.1213 bds=0.5939
+Benchmark eval step 24000: eval_loss=0.8246 | GREEDY  parse_ok=0.70 iou=0.3698 ndo=0.4989 cath=0.0049 cath_lvl=0.1091 bds=0.5743
+Benchmark eval step 25000: eval_loss=0.8271 | GREEDY  parse_ok=0.54 iou=0.3869 ndo=0.5518 cath=0.0020 cath_lvl=0.0927 bds=0.6000
+Benchmark eval step 26000: eval_loss=0.8117 | GREEDY  parse_ok=0.75 iou=0.4003 ndo=0.5636 cath=0.0067 cath_lvl=0.0847 bds=0.5793
+Benchmark eval step 27000: eval_loss=0.8096 | GREEDY  parse_ok=0.81 iou=0.4997 ndo=0.5126 cath=0.0050 cath_lvl=0.1595 bds=0.6175
+Benchmark eval step 28000: eval_loss=0.8159 | GREEDY  parse_ok=0.78 iou=0.5027 ndo=0.4939 cath=0.0000 cath_lvl=0.1453 bds=0.5603
+Benchmark eval step 29000: eval_loss=0.8012 | GREEDY  parse_ok=0.82 iou=0.5099 ndo=0.5455 cath=0.0100 cath_lvl=0.1564 bds=0.5745
+Benchmark eval step 30000: eval_loss=0.7924 | GREEDY  parse_ok=0.72 iou=0.4894 ndo=0.5473 cath=0.0000 cath_lvl=0.1483 bds=0.6178
+Benchmark eval step 31000: eval_loss=0.7886 | GREEDY  parse_ok=0.75 iou=0.4738 ndo=0.5172 cath=0.0083 cath_lvl=0.1301 bds=0.5466
+Benchmark eval step 32000: eval_loss=0.7823 | GREEDY  parse_ok=0.67 iou=0.4594 ndo=0.5313 cath=0.0050 cath_lvl=0.1426 bds=0.6009
+Benchmark eval step 33000: eval_loss=0.7825 | GREEDY  parse_ok=0.45 iou=0.4894 ndo=0.5084 cath=0.0142 cath_lvl=0.1516 bds=0.5786
+Benchmark eval step 34000: eval_loss=0.7797 | GREEDY  parse_ok=0.21 iou=0.3783 ndo=0.5261 cath=0.0033 cath_lvl=0.0999 bds=0.5481
+Benchmark eval step 35000: eval_loss=0.7740 | GREEDY  parse_ok=0.39 iou=0.4912 ndo=0.5548 cath=0.0058 cath_lvl=0.1467 bds=0.6005
+Benchmark eval step 36000: eval_loss=0.7745 | GREEDY  parse_ok=0.38 iou=0.3284 ndo=0.5544 cath=0.0045 cath_lvl=0.1007 bds=0.5939
+Benchmark eval step 37000: eval_loss=0.7635 | GREEDY  parse_ok=0.60 iou=0.5403 ndo=0.5470 cath=0.0150 cath_lvl=0.1745 bds=0.5905
+Benchmark eval step 38000: eval_loss=0.7738 | GREEDY  parse_ok=0.46 iou=0.4856 ndo=0.5127 cath=0.0067 cath_lvl=0.1176 bds=0.5606
+Benchmark eval step 39000: eval_loss=0.7617 | GREEDY  parse_ok=0.73 iou=0.3697 ndo=0.5504 cath=0.0045 cath_lvl=0.1025 bds=0.5831
+Benchmark eval step 40000: eval_loss=0.7640 | GREEDY  parse_ok=0.80 iou=0.4755 ndo=0.5577 cath=0.0025 cath_lvl=0.1340 bds=0.6118
+Benchmark eval step 41000: eval_loss=0.7628 | GREEDY  parse_ok=0.58 iou=0.4367 ndo=0.5430 cath=0.0117 cath_lvl=0.1541 bds=0.5624
+Benchmark eval step 42000: eval_loss=0.7576 | GREEDY  parse_ok=0.71 iou=0.4351 ndo=0.5613 cath=0.0067 cath_lvl=0.1243 bds=0.5980
+Benchmark eval step 43000: eval_loss=0.7533 | GREEDY  parse_ok=0.36 iou=0.4145 ndo=0.5480 cath=0.0025 cath_lvl=0.0890 bds=0.5813
+Benchmark eval step 44000: eval_loss=0.7544 | GREEDY  parse_ok=0.88 iou=0.3837 ndo=0.5804 cath=0.0058 cath_lvl=0.1038 bds=0.5616
+Benchmark eval step 45000: eval_loss=0.7455 | GREEDY  parse_ok=0.40 iou=0.3772 ndo=0.5705 cath=0.0087 cath_lvl=0.1288 bds=0.5983
+Benchmark eval step 46000: eval_loss=0.7515 | GREEDY  parse_ok=0.41 iou=0.4198 ndo=0.5868 cath=0.0117 cath_lvl=0.1359 bds=0.6110
+Benchmark eval step 47000: eval_loss=0.7486 | GREEDY  parse_ok=0.58 iou=0.3523 ndo=0.5656 cath=0.0058 cath_lvl=0.0829 bds=0.6355
+Benchmark eval step 48000: eval_loss=0.7401 | GREEDY  parse_ok=0.67 iou=0.4627 ndo=0.5678 cath=0.0050 cath_lvl=0.1504 bds=0.5841
+Benchmark eval step 49000: eval_loss=0.7406 | GREEDY  parse_ok=0.58 iou=0.3991 ndo=0.5811 cath=0.0025 cath_lvl=0.1301 bds=0.6143
+Benchmark eval step 50000: eval_loss=0.7389 | GREEDY  parse_ok=0.79 iou=0.4676 ndo=0.5819 cath=0.0158 cath_lvl=0.1463 bds=0.5812
+Benchmark eval step 51000: eval_loss=0.7398 | GREEDY  parse_ok=0.94 iou=0.4935 ndo=0.5685 cath=0.0025 cath_lvl=0.1499 bds=0.5969
+Benchmark eval step 52000: eval_loss=0.7371 | GREEDY  parse_ok=0.96 iou=0.4398 ndo=0.5982 cath=0.0050 cath_lvl=0.1107 bds=0.5930
+Benchmark eval step 53000: eval_loss=0.7275 | GREEDY  parse_ok=0.59 iou=0.3915 ndo=0.5855 cath=0.0151 cath_lvl=0.1150 bds=0.6106
+Benchmark eval step 54000: eval_loss=0.7363 | GREEDY  parse_ok=0.54 iou=0.4913 ndo=0.6290 cath=0.0092 cath_lvl=0.1472 bds=0.6177
+Benchmark eval step 55000: eval_loss=0.7318 | GREEDY  parse_ok=0.79 iou=0.4471 ndo=0.5575 cath=0.0125 cath_lvl=0.1402 bds=0.5878
+Benchmark eval step 56000: eval_loss=0.7263 | GREEDY  parse_ok=0.49 iou=0.4375 ndo=0.5879 cath=0.0133 cath_lvl=0.1240 bds=0.5771
+Benchmark eval step 57000: eval_loss=0.7226 | GREEDY  parse_ok=0.58 iou=0.4117 ndo=0.5840 cath=0.0095 cath_lvl=0.1374 bds=0.5839
+Benchmark eval step 58000: eval_loss=0.7206 | GREEDY  parse_ok=0.84 iou=0.4675 ndo=0.5863 cath=0.0125 cath_lvl=0.1511 bds=0.5958
+Benchmark eval step 59000: eval_loss=0.7166 | GREEDY  parse_ok=0.85 iou=0.4905 ndo=0.5758 cath=0.0168 cath_lvl=0.1285 bds=0.5879
+Benchmark eval step 60000: eval_loss=0.7248 | GREEDY  parse_ok=0.46 iou=0.4546 ndo=0.5883 cath=0.0170 cath_lvl=0.1045 bds=0.5680
+Benchmark eval step 61000: eval_loss=0.7210 | GREEDY  parse_ok=0.84 iou=0.5081 ndo=0.6266 cath=0.0125 cath_lvl=0.1171 bds=0.6080
+Benchmark eval step 62000: eval_loss=0.7144 | GREEDY  parse_ok=0.84 iou=0.4912 ndo=0.5890 cath=0.0083 cath_lvl=0.1473 bds=0.5948
+Benchmark eval step 63000: eval_loss=0.7180 | GREEDY  parse_ok=0.70 iou=0.4368 ndo=0.5954 cath=0.0123 cath_lvl=0.1127 bds=0.6148
+Benchmark eval step 64000: eval_loss=0.7172 | GREEDY  parse_ok=0.92 iou=0.4916 ndo=0.5921 cath=0.0167 cath_lvl=0.1520 bds=0.6235
+Benchmark eval step 65000: eval_loss=0.7190 | GREEDY  parse_ok=0.79 iou=0.4909 ndo=0.6348 cath=0.0067 cath_lvl=0.1496 bds=0.6520
+Benchmark eval step 66000: eval_loss=0.7186 | GREEDY  parse_ok=0.94 iou=0.4984 ndo=0.6113 cath=0.0181 cath_lvl=0.1427 bds=0.6213
+Benchmark eval step 67000: eval_loss=0.7084 | GREEDY  parse_ok=0.80 iou=0.4832 ndo=0.5840 cath=0.0050 cath_lvl=0.1294 bds=0.5974
+Benchmark eval step 68000: eval_loss=0.7077 | GREEDY  parse_ok=0.89 iou=0.4816 ndo=0.6382 cath=0.0133 cath_lvl=0.1287 bds=0.6165
+Benchmark eval step 69000: eval_loss=0.7037 | GREEDY  parse_ok=0.88 iou=0.4499 ndo=0.5946 cath=0.0108 cath_lvl=0.1194 bds=0.6237
+Benchmark eval step 70000: eval_loss=0.7068 | GREEDY  parse_ok=0.94 iou=0.5162 ndo=0.6080 cath=0.0083 cath_lvl=0.1632 bds=0.5845
+Benchmark eval step 71000: eval_loss=0.7023 | GREEDY  parse_ok=0.71 iou=0.4792 ndo=0.6045 cath=0.0193 cath_lvl=0.1372 bds=0.6226
+Benchmark eval step 72000: eval_loss=0.7070 | GREEDY  parse_ok=0.72 iou=0.4415 ndo=0.6026 cath=0.0170 cath_lvl=0.1157 bds=0.6277
+Benchmark eval step 73000: eval_loss=0.7034 | GREEDY  parse_ok=0.94 iou=0.4903 ndo=0.6285 cath=0.0108 cath_lvl=0.1355 bds=0.6219
+Benchmark eval step 74000: eval_loss=0.7035 | GREEDY  parse_ok=0.97 iou=0.5056 ndo=0.6025 cath=0.0087 cath_lvl=0.1448 bds=0.6348
+Benchmark eval step 75000: eval_loss=0.7000 | GREEDY  parse_ok=0.62 iou=0.4817 ndo=0.6179 cath=0.0137 cath_lvl=0.1353 bds=0.6046
+Benchmark eval step 76000: eval_loss=0.6944 | GREEDY  parse_ok=0.87 iou=0.4576 ndo=0.6333 cath=0.0117 cath_lvl=0.1243 bds=0.6208
+Benchmark eval step 77000: eval_loss=0.6961 | GREEDY  parse_ok=0.90 iou=0.5127 ndo=0.6391 cath=0.0117 cath_lvl=0.1381 bds=0.6127
+Benchmark eval step 78000: eval_loss=0.6959 | GREEDY  parse_ok=0.86 iou=0.4254 ndo=0.6189 cath=0.0128 cath_lvl=0.1216 bds=0.5927
+Benchmark eval step 79000: eval_loss=0.6949 | GREEDY  parse_ok=0.90 iou=0.4723 ndo=0.6232 cath=0.0233 cath_lvl=0.1423 bds=0.6207
+Benchmark eval step 80000: eval_loss=0.6937 | GREEDY  parse_ok=0.93 iou=0.4985 ndo=0.6285 cath=0.0233 cath_lvl=0.1465 bds=0.6132
+Benchmark eval step 81000: eval_loss=0.6908 | GREEDY  parse_ok=0.65 iou=0.4242 ndo=0.6144 cath=0.0387 cath_lvl=0.1512 bds=0.5935
+Benchmark eval step 82000: eval_loss=0.6953 | GREEDY  parse_ok=0.65 iou=0.3664 ndo=0.5975 cath=0.0262 cath_lvl=0.1187 bds=0.5875
+Benchmark eval step 83000: eval_loss=0.6909 | GREEDY  parse_ok=0.39 iou=0.4521 ndo=0.6616 cath=0.0208 cath_lvl=0.1537 bds=0.6251
+Benchmark eval step 84000: eval_loss=0.6896 | GREEDY  parse_ok=0.82 iou=0.4706 ndo=0.6317 cath=0.0167 cath_lvl=0.1458 bds=0.6180
+Benchmark eval step 85000: eval_loss=0.6787 | GREEDY  parse_ok=0.76 iou=0.3924 ndo=0.5852 cath=0.0133 cath_lvl=0.1017 bds=0.5910
+Benchmark eval step 86000: eval_loss=0.6936 | GREEDY  parse_ok=0.74 iou=0.4505 ndo=0.6254 cath=0.0133 cath_lvl=0.1410 bds=0.6127
+Benchmark eval step 87000: eval_loss=0.6864 | GREEDY  parse_ok=0.86 iou=0.4846 ndo=0.6139 cath=0.0200 cath_lvl=0.1473 bds=0.6263
+Benchmark eval step 88000: eval_loss=0.6852 | GREEDY  parse_ok=0.93 iou=0.5506 ndo=0.6317 cath=0.0133 cath_lvl=0.1625 bds=0.6309
+Benchmark eval step 89000: eval_loss=0.6836 | GREEDY  parse_ok=0.91 iou=0.5371 ndo=0.6303 cath=0.0175 cath_lvl=0.1797 bds=0.6137
+Benchmark eval step 90000: eval_loss=0.6851 | GREEDY  parse_ok=0.60 iou=0.4256 ndo=0.6085 cath=0.0283 cath_lvl=0.1442 bds=0.6063
+Benchmark eval step 91000: eval_loss=0.6838 | GREEDY  parse_ok=0.84 iou=0.4621 ndo=0.6267 cath=0.0175 cath_lvl=0.1398 bds=0.5975
+Benchmark eval step 92000: eval_loss=0.6875 | GREEDY  parse_ok=0.83 iou=0.4061 ndo=0.6050 cath=0.0150 cath_lvl=0.1253 bds=0.6172
+Benchmark eval step 93000: eval_loss=0.6828 | GREEDY  parse_ok=0.77 iou=0.4315 ndo=0.6227 cath=0.0257 cath_lvl=0.1394 bds=0.6280
+Benchmark eval step 94000: eval_loss=0.6804 | GREEDY  parse_ok=0.95 iou=0.4931 ndo=0.6114 cath=0.0526 cath_lvl=0.1473 bds=0.6037
+Benchmark eval step 95000: eval_loss=0.6756 | GREEDY  parse_ok=0.70 iou=0.3662 ndo=0.6439 cath=0.0270 cath_lvl=0.1146 bds=0.5901
+Benchmark eval step 96000: eval_loss=0.6784 | GREEDY  parse_ok=0.77 iou=0.3733 ndo=0.6209 cath=0.0240 cath_lvl=0.1225 bds=0.5714
+Benchmark eval step 97000: eval_loss=0.6691 | GREEDY  parse_ok=0.75 iou=0.4974 ndo=0.6496 cath=0.0368 cath_lvl=0.1659 bds=0.6269
+Benchmark eval step 98000: eval_loss=0.6710 | GREEDY  parse_ok=0.80 iou=0.4405 ndo=0.6533 cath=0.0167 cath_lvl=0.1359 bds=0.6007
+Benchmark eval step 99000: eval_loss=0.6696 | GREEDY  parse_ok=0.51 iou=0.4433 ndo=0.6280 cath=0.0262 cath_lvl=0.1539 bds=0.6247
+Benchmark eval step 100000: eval_loss=0.6717 | GREEDY  parse_ok=0.30 iou=0.4527 ndo=0.6176 cath=0.0331 cath_lvl=0.1530 bds=0.6063
+Benchmark eval step 101000: eval_loss=0.6704 | GREEDY  parse_ok=0.72 iou=0.3691 ndo=0.6549 cath=0.0517 cath_lvl=0.1201 bds=0.6192
+Benchmark eval step 102000: eval_loss=0.6724 | GREEDY  parse_ok=0.65 iou=0.4133 ndo=0.6426 cath=0.0320 cath_lvl=0.1160 bds=0.6272
+Benchmark eval step 103000: eval_loss=0.6693 | GREEDY  parse_ok=0.76 iou=0.3912 ndo=0.6105 cath=0.0400 cath_lvl=0.1329 bds=0.6102
+Benchmark eval step 104000: eval_loss=0.6668 | GREEDY  parse_ok=0.53 iou=0.4149 ndo=0.6154 cath=0.0283 cath_lvl=0.1483 bds=0.5860
+Benchmark eval step 105000: eval_loss=0.6674 | GREEDY  parse_ok=0.50 iou=0.5083 ndo=0.6346 cath=0.0351 cath_lvl=0.1877 bds=0.6169
+Benchmark eval step 106000: eval_loss=0.6710 | GREEDY  parse_ok=0.41 iou=0.4651 ndo=0.6394 cath=0.0317 cath_lvl=0.1573 bds=0.6103
+Benchmark eval step 107000: eval_loss=0.6590 | GREEDY  parse_ok=0.58 iou=0.4058 ndo=0.6328 cath=0.0303 cath_lvl=0.1379 bds=0.6225
+Benchmark eval step 108000: eval_loss=0.6653 | GREEDY  parse_ok=0.59 iou=0.4357 ndo=0.6489 cath=0.0210 cath_lvl=0.1452 bds=0.6369
+Benchmark eval step 109000: eval_loss=0.6471 | GREEDY  parse_ok=0.46 iou=0.4958 ndo=0.6367 cath=0.0325 cath_lvl=0.1587 bds=0.6048

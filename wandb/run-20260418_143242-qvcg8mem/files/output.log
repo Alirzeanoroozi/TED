@@ -1,0 +1,22 @@
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/callbacks/model_checkpoint.py:881: Checkpoint directory /scratch/esevinc22/new_TED/TED/lightning_logs exists and is not empty.
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+┏━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━┓
+┃   ┃ Name      ┃ Type                  ┃ Params ┃ Mode  ┃ FLOPs ┃
+┡━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━┩
+│ 0 │ model     │ TextToTextTransformer │  7.4 M │ train │     0 │
+│ 1 │ criterion │ CrossEntropyLoss      │      0 │ train │     0 │
+└───┴───────────┴───────────────────────┴────────┴───────┴───────┘
+Trainable params: 7.4 M
+Non-trainable params: 0
+Total params: 7.4 M
+Total estimated model params size (MB): 29
+Modules in train mode: 107
+Modules in eval mode: 0
+Total FLOPs: 0
+SLURM auto-requeueing enabled. Setting signal handlers.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:434: The 'val_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=21` in the `DataLoader` to improve performance.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/torch/nn/modules/transformer.py:508: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. We recommend specifying layout=torch.jagged when constructing a nested tensor, as this layout receives active development, has better operator coverage, and works with torch.compile. (Triggered internally at /pytorch/aten/src/ATen/NestedTensorImpl.cpp:178.)
+  output = torch._nested_tensor_from_mask(
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/utilities/data.py:79: Trying to infer the `batch_size` from an ambiguous collection. The batch size we found is 8. To avoid any miscalculations, use `self.log(..., batch_size=batch_size)`.
+/home/esevinc22/.conda/envs/ted/lib/python3.10/site-packages/pytorch_lightning/trainer/connectors/data_connector.py:434: The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=21` in the `DataLoader` to improve performance.
+Benchmark eval step 1000: eval_loss=1.2615 | GREEDY  parse_ok=0.37 iou=0.2555 ndo=0.0727 cath=0.0033 cath_lvl=0.0571 bds=0.4505 | GUIDED  parse_ok=0.86 iou=0.3124 cath=0.1725 cath_lvl=0.0521 bds=0.4475

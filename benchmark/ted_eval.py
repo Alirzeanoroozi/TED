@@ -20,7 +20,6 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -202,11 +201,18 @@ def parse_annotation(annotation: Any, *, input_indexing: str = "one_based_inclus
     return parsed
 
 
+_MAX_RESIDUE_SPAN = 10_000  # guard: no real protein has a segment longer than this
+
+
 def _domain_residue_sets(parsed: ParsedAnnotation) -> List[set[int]]:
     residue_sets: List[set[int]] = []
     for domain in parsed.domains:
         residues: set[int] = set()
         for start, end in domain.segments:
+            # Cap pathologically large ranges from garbage greedy-decoder output.
+            # Allocating range(0, 9_999_999) causes MemoryError with 100-sample evals.
+            if end - start > _MAX_RESIDUE_SPAN:
+                end = start + _MAX_RESIDUE_SPAN
             residues.update(range(start, end))
         residue_sets.append(residues)
     return residue_sets
@@ -323,47 +329,89 @@ def _optimal_assignment(iou_matrix: np.ndarray) -> Tuple[float, List[Tuple[int, 
     if max(n_pred, n_gt) > 12:
         return _greedy_assignment(iou_matrix)
 
+    # Use an explicit memo dict instead of @lru_cache on a local function.
+    # @lru_cache on a locally-defined recursive closure creates a reference
+    # cycle (wrapper -> __wrapped__ -> closure -> wrapper) that the refcount
+    # GC cannot immediately collect.  With 200 evaluate_target calls per
+    # benchmark eval, the cache residue accumulates to hundreds of MB before
+    # gc.collect() runs.  A plain dict is freed the moment this function returns.
+    memo: dict = {}
+
     if n_pred <= n_gt:
-
-        @lru_cache(maxsize=None)
         def solve(i: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:
+            key = (i, used_mask)
+            if key in memo:
+                return memo[key]
             if i == n_pred:
-                return 0.0, tuple()
-
-            best_score = -1.0
-            best_pairs: Tuple[Tuple[int, int], ...] = tuple()
-            for j in range(n_gt):
-                if used_mask & (1 << j):
-                    continue
-                sub_score, sub_pairs = solve(i + 1, used_mask | (1 << j))
-                cand_score = float(iou_matrix[i, j]) + sub_score
-                if cand_score > best_score:
-                    best_score = cand_score
-                    best_pairs = ((i, j),) + sub_pairs
-            return best_score, best_pairs
+                result: Tuple[float, Tuple[Tuple[int, int], ...]] = (0.0, tuple())
+            else:
+                best_score = -1.0
+                best_pairs: Tuple[Tuple[int, int], ...] = tuple()
+                for j in range(n_gt):
+                    if used_mask & (1 << j):
+                        continue
+                    sub_score, sub_pairs = solve(i + 1, used_mask | (1 << j))
+                    cand_score = float(iou_matrix[i, j]) + sub_score
+                    if cand_score > best_score:
+                        best_score = cand_score
+                        best_pairs = ((i, j),) + sub_pairs
+                result = (best_score, best_pairs)
+            memo[key] = result
+            return result
 
         score, pairs = solve(0, 0)
         return float(score), list(pairs)
 
-    @lru_cache(maxsize=None)
-    def solve(j: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:
+    def solve(j: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:  # type: ignore[misc]
+        key = (j, used_mask)
+        if key in memo:
+            return memo[key]
         if j == n_gt:
-            return 0.0, tuple()
-
-        best_score = -1.0
-        best_pairs: Tuple[Tuple[int, int], ...] = tuple()
-        for i in range(n_pred):
-            if used_mask & (1 << i):
-                continue
-            sub_score, sub_pairs = solve(j + 1, used_mask | (1 << i))
-            cand_score = float(iou_matrix[i, j]) + sub_score
-            if cand_score > best_score:
-                best_score = cand_score
-                best_pairs = ((i, j),) + sub_pairs
-        return best_score, best_pairs
+            result = (0.0, tuple())
+        else:
+            best_score = -1.0
+            best_pairs: Tuple[Tuple[int, int], ...] = tuple()
+            for i in range(n_pred):
+                if used_mask & (1 << i):
+                    continue
+                sub_score, sub_pairs = solve(j + 1, used_mask | (1 << i))
+                cand_score = float(iou_matrix[i, j]) + sub_score
+                if cand_score > best_score:
+                    best_score = cand_score
+                    best_pairs = ((i, j),) + sub_pairs
+            result = (best_score, best_pairs)
+        memo[key] = result
+        return result
 
     score, pairs = solve(0, 0)
     return float(score), list(pairs)
+
+
+def _cath_level_score(pred_label: Optional[str], gt_label: Optional[str]) -> float:
+    """Compute hierarchical CATH match score (0.0–1.0).
+
+    Splits both labels on '.' and counts how many leading levels match.
+    Score = matched_levels / 4 (normalised to the 4 C.A.T.H levels).
+
+    Examples
+    --------
+    '3.40.50.300' vs '3.40.50.300'  -> 4/4 = 1.0
+    '3.40.50.300' vs '3.40.50.720'  -> 3/4 = 0.75
+    '3.40.50.300' vs '3.40.190.10'  -> 2/4 = 0.5
+    '3.40.50.300' vs '1.10.10.10'   -> 0/4 = 0.0  (C differs)
+    None          vs anything        -> 0.0
+    """
+    if pred_label is None or gt_label is None:
+        return 0.0
+    pred_parts = pred_label.strip().split(".")
+    gt_parts = gt_label.strip().split(".")
+    matched = 0
+    for p, g in zip(pred_parts, gt_parts):
+        if p == g:
+            matched += 1
+        else:
+            break
+    return matched / 4.0
 
 
 def chain_overlap_metrics(
@@ -386,6 +434,7 @@ def chain_overlap_metrics(
             "iou_chain": 1.0,
             "correct_prop": 1.0,
             "correct_cath_prop": 1.0,
+            "cath_level_score": 1.0,
         }
 
     if n_gt == 0 or n_pred == 0:
@@ -393,6 +442,7 @@ def chain_overlap_metrics(
             "iou_chain": 0.0,
             "correct_prop": 0.0,
             "correct_cath_prop": 0.0,
+            "cath_level_score": 0.0,
         }
 
     iou_matrix = np.zeros((n_pred, n_gt), dtype=float)
@@ -404,6 +454,7 @@ def chain_overlap_metrics(
 
     correct = 0
     correct_cath = 0
+    cath_level_scores: List[float] = []
     for i, j in pairs:
         iou_val = float(iou_matrix[i, j])
         if iou_val >= iou_threshold:
@@ -414,10 +465,18 @@ def chain_overlap_metrics(
         if pred_label == gt_label:
             correct_cath += 1
 
+        cath_level_scores.append(_cath_level_score(pred_label, gt_label))
+
+    # Unmatched domains score 0 for the CATH level metric — pad up to denom.
+    n_unmatched = denom - len(pairs)
+    cath_level_scores.extend([0.0] * n_unmatched)
+    mean_cath_level = float(np.mean(cath_level_scores)) if cath_level_scores else 0.0
+
     return {
         "iou_chain": total_iou / denom,
         "correct_prop": correct / denom,
         "correct_cath_prop": correct_cath / denom,
+        "cath_level_score": mean_cath_level,
     }
 
 
@@ -520,6 +579,8 @@ def evaluate_target(
 
     # Backward-compatible alias used in existing CSVs.
     out["correct_cath"] = out["correct_cath_prop"]
+    # Hierarchical CATH level score (0–1) aliased for convenience.
+    out["cath_level_score"] = out["cath_level_score"]
 
     try:
         out["ndo"] = float(ndo_score(gt_dict, pred_dict))
@@ -636,6 +697,7 @@ def summarize_metrics(metrics_df: pd.DataFrame) -> Tuple[Dict[str, Any], pd.Data
         "iou_chain",
         "correct_prop",
         "correct_cath_prop",
+        "cath_level_score",
         "ndo",
         "boundary_distance_score",
     ]
