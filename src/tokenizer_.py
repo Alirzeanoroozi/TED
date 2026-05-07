@@ -1,8 +1,3 @@
-
-# ---------------------------------------------------------------------------
-# Tokenizer: build vocab from data (amino acids + chopping_star symbols)
-# ---------------------------------------------------------------------------
-
 import torch
 
 PAD_TOKEN = "<pad>"
@@ -10,12 +5,9 @@ SOS_TOKEN = "<sos>"
 EOS_TOKEN = "<eos>"
 UNK_TOKEN = "<unk>"
 
-
 class TextTokenizer:
-    """Character/token-level tokenizer for sequence and chopping_star."""
-
-    def __init__(self, special_tokens=None):
-        self.special_tokens = special_tokens or [PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN]
+    def __init__(self):
+        self.special_tokens = [PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN]
         self.token2id = {t: i for i, t in enumerate(self.special_tokens)}
         self.id2token = {i: t for t, i in self.token2id.items()}
         self.pad_id = self.token2id[PAD_TOKEN]
@@ -24,7 +16,6 @@ class TextTokenizer:
         self.unk_id = self.token2id[UNK_TOKEN]
 
     def fit(self, sequences):
-        """Build vocabulary from list of strings."""
         for seq in sequences:
             for c in seq:
                 if c not in self.token2id:
@@ -33,7 +24,7 @@ class TextTokenizer:
                     self.id2token[idx] = c
         return self
 
-    def encode(self, text, add_sos_eos=False):
+    def encode(self, text, add_sos_eos=True):
         ids = [self.token2id.get(c, self.unk_id) for c in text]
         if add_sos_eos:
             ids = [self.sos_id] + ids + [self.eos_id]
@@ -52,5 +43,3 @@ class TextTokenizer:
     @property
     def vocab_size(self):
         return len(self.token2id)
-
-

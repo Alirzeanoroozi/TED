@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 498, in <module>
+    main()
+  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 456, in main
+    model = TEDLightningModule(
+            ^^^^^^^^^^^^^^^^^^^
+TypeError: TEDLightningModule.__init__() missing 1 required positional argument: 'src_pad_id'

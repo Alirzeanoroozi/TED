@@ -1,7 +1,3 @@
-# ---------------------------------------------------------------------------
-# Model: Encoder-Decoder Transformer from scratch
-# ---------------------------------------------------------------------------
-
 import torch
 import torch.nn as nn
 import math
@@ -22,10 +18,7 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, : x.size(1), :]
         return self.dropout(x)
 
-
 class TextToTextTransformer(nn.Module):
-    """Encoder-decoder transformer for sequence -> chopping_star."""
-
     def __init__(
         self,
         src_vocab_size,
