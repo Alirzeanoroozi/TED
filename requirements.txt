@@ -14,3 +14,9 @@ wandb>=0.15.0
 pydantic>=2.7.4
 python-dotenv>=1.0.0
 biopython>=1.80
+
+# two-stage model: frozen ESM2 protein-LM backbone
+fair-esm>=2.0.0
+# optional: spectral clustering for Stage-A domain decoding (falls back to
+# connected-components if absent)
+scikit-learn>=1.1.0
