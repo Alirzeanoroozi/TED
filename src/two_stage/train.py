@@ -202,9 +202,15 @@ class TwoStageLightningModule(pl.LightningModule):
         cluster_method: str = "connected_components",
         min_domain_len: int = 20,
         benchmark_num_logged_samples: int = 5,
+        # ---- Tier 3: CATH long-tail handling (CATH head only) ----
+        cath_loss_type: str = "ce",          # ce | focal | class_balanced | cb_focal
+        focal_gamma: float = 2.0,
+        cath_level_weights: tuple = (1.0, 1.0, 1.0, 1.0),
+        cath_curriculum_steps: int = 0,      # >0 ramps deeper levels in over N steps
+        cath_class_weights: list | None = None,  # per-level tensors (class-balanced)
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["cath_vocab"])
+        self.save_hyperparameters(ignore=["cath_vocab", "cath_class_weights"])
         self.cath_vocab = cath_vocab
         self.model = TwoStageDomainModel(
             cath_vocab=cath_vocab,
@@ -217,6 +223,36 @@ class TwoStageLightningModule(pl.LightningModule):
         )
         self.benchmark_eval_config = EvalConfig(input_indexing="one_based_inclusive")
         self._pair_gen = torch.Generator()
+
+        # Register class-balanced weights as buffers so they follow the module to
+        # the GPU. Used only when cath_loss_type in {class_balanced, cb_focal}.
+        self._n_cath_levels = len(cath_vocab.level_sizes)
+        if cath_class_weights is not None:
+            for lvl, w in enumerate(cath_class_weights):
+                self.register_buffer(f"cath_cw_{lvl}", torch.as_tensor(w, dtype=torch.float))
+            self._has_class_weights = True
+        else:
+            self._has_class_weights = False
+
+    def _class_weights_list(self):
+        if not self._has_class_weights:
+            return None
+        return [getattr(self, f"cath_cw_{lvl}") for lvl in range(self._n_cath_levels)]
+
+    def _current_level_weights(self):
+        """Static CATH level weights, optionally ramping deeper levels in (3.2)."""
+        base = list(self.hparams.cath_level_weights)
+        steps = int(self.hparams.cath_curriculum_steps)
+        if steps <= 0:
+            return base
+        seg = steps / len(base)
+        gstep = float(self.global_step)
+        out = []
+        for lvl in range(len(base)):
+            f = min(1.0, max(0.0, (gstep - lvl * seg) / max(1.0, seg)))
+            out.append(base[lvl] * f)
+        out[0] = base[0]  # coarse level always fully active
+        return out
 
     # ---- backbone device management ------------------------------------ #
     def _ensure_backbone(self):
@@ -246,9 +282,15 @@ class TwoStageLightningModule(pl.LightningModule):
             max_pair_len=self.hparams.max_pair_len, generator=self._pair_gen,
         )
         if out["cath_logits"] is not None and parent_ids.numel() > 0:
-            cath_loss = losses.cath_ce_loss(
+            loss_type = self.hparams.cath_loss_type
+            use_focal = loss_type in ("focal", "cb_focal")
+            use_cw = loss_type in ("class_balanced", "cb_focal")
+            cath_loss = losses.cath_loss(
                 out["cath_logits"], parent_ids,
-                label_smoothing=self.hparams.label_smoothing,
+                label_smoothing=0.0 if use_focal else self.hparams.label_smoothing,
+                focal_gamma=self.hparams.focal_gamma if use_focal else 0.0,
+                class_weights=self._class_weights_list() if use_cw else None,
+                level_weights=self._current_level_weights(),
             )
         else:
             cath_loss = torch.zeros((), device=self.device)
@@ -289,9 +331,7 @@ class TwoStageLightningModule(pl.LightningModule):
 
         keys = ["iou_chain", "ndo", "correct_prop", "correct_cath",
                 "cath_level_score", "boundary_distance_score"]
-        acc = {k: [] for k in keys}
-        n = 0
-        pred_ok = dcount_ok = 0
+        rows = []          # one dict per chain (metrics + gt_domain_count + parse flags)
         sample_rows = []
         max_logged = max(0, int(self.hparams.benchmark_num_logged_samples))
 
@@ -304,11 +344,11 @@ class TwoStageLightningModule(pl.LightningModule):
             for seq, tgt, pred in zip(batch["sequences"], batch["chopping_star"], preds):
                 m = evaluate_target(tgt, pred, nres=len(seq), sequence=seq,
                                     config=self.benchmark_eval_config)
-                for k in keys:
-                    acc[k].append(float(m[k]))
-                pred_ok += int(bool(m["pred_parse_ok"]))
-                dcount_ok += int(bool(m["domain_count_match"]))
-                n += 1
+                row = {k: float(m[k]) for k in keys}
+                row["pred_parse_ok"] = int(bool(m["pred_parse_ok"]))
+                row["domain_count_match"] = int(bool(m["domain_count_match"]))
+                row["gt_domain_count"] = int(m["gt_domain_count"])
+                rows.append(row)
                 if len(sample_rows) < max_logged:
                     sample_rows.append({
                         "input_len": len(seq), "target": tgt, "predicted": pred,
@@ -321,22 +361,29 @@ class TwoStageLightningModule(pl.LightningModule):
 
         if was_training:
             self.train()
-        if n == 0:
+        if not rows:
             return None
 
         def mean(x):
             return float(np.nanmean(x)) if x else float("nan")
 
-        out = {
-            "val_subset_iou_chain": mean(acc["iou_chain"]),
-            "val_subset_ndo": mean(acc["ndo"]),
-            "val_subset_correct_prop": mean(acc["correct_prop"]),
-            "val_subset_correct_cath": mean(acc["correct_cath"]),
-            "val_subset_cath_level_score": mean(acc["cath_level_score"]),
-            "val_subset_boundary_distance_score": mean(acc["boundary_distance_score"]),
-            "val_subset_pred_parse_ok_rate": pred_ok / n,
-            "val_subset_domain_count_match_rate": dcount_ok / n,
+        # Break out by domain count so multi-domain progress (the bottleneck) is
+        # visible during training, not just the aggregate.
+        groups = {
+            "": rows,
+            "single_": [r for r in rows if r["gt_domain_count"] == 1],
+            "multi_": [r for r in rows if r["gt_domain_count"] >= 2],
         }
+        out = {}
+        for prefix, grp in groups.items():
+            if not grp:
+                continue
+            out[f"val_subset_{prefix}n"] = len(grp)
+            for k in keys:
+                out[f"val_subset_{prefix}{k}"] = mean([r[k] for r in grp])
+            out[f"val_subset_{prefix}pred_parse_ok_rate"] = mean([r["pred_parse_ok"] for r in grp])
+            out[f"val_subset_{prefix}domain_count_match_rate"] = mean([r["domain_count_match"] for r in grp])
+
         if sample_rows and isinstance(self.logger, WandbLogger):
             cols = list(sample_rows[0].keys())
             table = wandb.Table(columns=cols)
@@ -395,16 +442,22 @@ class PeriodicBenchmarkEvalCallback(Callback):
                 trainer.logger.log_metrics(metrics, step=step)
                 if table is not None and isinstance(trainer.logger, WandbLogger):
                     trainer.logger.experiment.log({"benchmark_samples": table}, step=step)
-                rank_zero_info(
-                    f"[bench step {step}] iou={metrics['val_subset_iou_chain']:.3f} "
+                msg = (
+                    f"[bench step {step}] ALL iou={metrics['val_subset_iou_chain']:.3f} "
                     f"correct={metrics['val_subset_correct_prop']:.3f} "
                     f"bds={metrics['val_subset_boundary_distance_score']:.3f} "
-                    f"ndo={metrics['val_subset_ndo']:.3f} "
                     f"cath={metrics['val_subset_correct_cath']:.3f} "
                     f"cath_lvl={metrics['val_subset_cath_level_score']:.3f} "
-                    f"parse_ok={metrics['val_subset_pred_parse_ok_rate']:.2f} "
-                    f"dcount={metrics['val_subset_domain_count_match_rate']:.2f}"
+                    f"parse_ok={metrics['val_subset_pred_parse_ok_rate']:.2f}"
                 )
+                if "val_subset_multi_iou_chain" in metrics:
+                    msg += (
+                        f" | MULTI(n={metrics.get('val_subset_multi_n', 0)}) "
+                        f"iou={metrics['val_subset_multi_iou_chain']:.3f} "
+                        f"correct={metrics['val_subset_multi_correct_prop']:.3f} "
+                        f"cath={metrics['val_subset_multi_correct_cath']:.3f}"
+                    )
+                rank_zero_info(msg)
                 del metrics, table
                 gc.collect()
                 if torch.cuda.is_available():
@@ -447,6 +500,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pair_loss_weight", type=float, default=1.0)
     p.add_argument("--cath_loss_weight", type=float, default=1.0)
     p.add_argument("--max_pair_len", type=int, default=768)
+    # Tier 3: CATH long-tail handling (applied to the CATH head only)
+    p.add_argument("--cath_loss_type", type=str, default="ce",
+                   choices=["ce", "focal", "class_balanced", "cb_focal"],
+                   help="ce=cross-entropy; focal; class_balanced=Cui et al. weights; "
+                        "cb_focal=class-balanced focal")
+    p.add_argument("--focal_gamma", type=float, default=2.0)
+    p.add_argument("--cb_beta", type=float, default=0.999,
+                   help="Class-balanced re-weighting beta (closer to 1 = stronger).")
+    p.add_argument("--cath_level_weights", type=str, default="1,1,1,1",
+                   help="Comma-separated static weights for C,A,T,H loss terms.")
+    p.add_argument("--cath_curriculum_steps", type=int, default=0,
+                   help="If >0, ramp deeper CATH levels in over this many steps (coarse-to-fine).")
     # clustering / eval
     p.add_argument("--cluster_method", type=str, default="connected_components",
                    choices=["connected_components", "spectral"])
@@ -483,6 +548,19 @@ def main():
     )
     dm.setup()
 
+    level_weights = tuple(float(x) for x in str(args.cath_level_weights).split(","))
+    # Class-balanced weights from TRAIN-set CATH frequencies (used only when the
+    # loss type asks for them). Boundary losses stay on the natural distribution.
+    cath_class_weights = None
+    if args.cath_loss_type in ("class_balanced", "cb_focal"):
+        cw = dm.cath_vocab.class_balanced_weights(beta=args.cb_beta)
+        cath_class_weights = [torch.tensor(w, dtype=torch.float) for w in cw]
+        rank_zero_info(
+            "Class-balanced CATH weights enabled (beta="
+            f"{args.cb_beta}); per-level weight ranges: "
+            + ", ".join(f"L{l}[{min(w):.2f},{max(w):.2f}]" for l, w in enumerate(cw))
+        )
+
     model = TwoStageLightningModule(
         cath_vocab=dm.cath_vocab,
         esm_model_name=args.esm_model_name,
@@ -499,6 +577,11 @@ def main():
         max_pair_len=args.max_pair_len,
         cluster_method=args.cluster_method, min_domain_len=args.min_domain_len,
         benchmark_num_logged_samples=args.benchmark_num_logged_samples,
+        cath_loss_type=args.cath_loss_type,
+        focal_gamma=args.focal_gamma,
+        cath_level_weights=level_weights,
+        cath_curriculum_steps=args.cath_curriculum_steps,
+        cath_class_weights=cath_class_weights,
     )
 
     load_dotenv()

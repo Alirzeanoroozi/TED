@@ -24,6 +24,8 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 UNK_TOKEN = "<unk>"
 UNK_ID = 0
 N_LEVELS = 4
@@ -53,7 +55,11 @@ def split_cath_code(code: Optional[str]) -> List[str]:
 class CathVocab:
     """Four cumulative-prefix vocabularies (one per CATH level)."""
 
-    def __init__(self, level_token2id: Optional[List[Dict[str, int]]] = None):
+    def __init__(
+        self,
+        level_token2id: Optional[List[Dict[str, int]]] = None,
+        level_counts: Optional[List[List[int]]] = None,
+    ):
         if level_token2id is None:
             level_token2id = [{UNK_TOKEN: UNK_ID} for _ in range(N_LEVELS)]
         assert len(level_token2id) == N_LEVELS
@@ -61,6 +67,12 @@ class CathVocab:
         self.level_id2token: List[Dict[int, str]] = [
             {i: t for t, i in m.items()} for m in level_token2id
         ]
+        # Per-level training-frequency of each class id (index = id). Used to
+        # build class-balanced / focal CATH-loss weights. Filled by build() or
+        # count_levels(); zeros until then.
+        if level_counts is None:
+            level_counts = [[0] * len(m) for m in level_token2id]
+        self.level_counts: List[List[int]] = level_counts
 
     # ---- construction --------------------------------------------------- #
     @classmethod
@@ -85,7 +97,37 @@ class CathVocab:
                 if c >= min_count:
                     token2id[token] = len(token2id)
             level_token2id.append(token2id)
-        return cls(level_token2id)
+        vocab = cls(level_token2id)
+        # Count per-class training frequency (encoding every code, so UNK -- from
+        # dropped/rare codes and from None/'-' unlabeled domains -- is counted too).
+        vocab.level_counts = vocab.count_levels(cath_codes)
+        return vocab
+
+    def count_levels(self, cath_codes: Sequence[Optional[str]]) -> List[List[int]]:
+        """Per-level, per-class-id training counts for the given codes."""
+        counts = [[0] * len(m) for m in self.level_token2id]
+        for code in cath_codes:
+            for level, cid in enumerate(self.encode(code)):
+                counts[level][cid] += 1
+        return counts
+
+    def class_balanced_weights(self, beta: float = 0.999) -> List[List[float]]:
+        """Class-balanced weights (Cui et al. 2019): w_c = (1-beta)/(1-beta^n_c).
+
+        Normalised per level so the mean weight is 1. Classes with zero training
+        count get the level's mean weight (neutral).
+        """
+        out: List[List[float]] = []
+        for level in range(N_LEVELS):
+            counts = np.asarray(self.level_counts[level], dtype=np.float64)
+            eff = 1.0 - np.power(beta, np.maximum(counts, 1.0))
+            w = (1.0 - beta) / np.maximum(eff, 1e-12)
+            w[counts <= 0] = np.nan  # neutralise unseen classes below
+            mean_w = np.nanmean(w) if np.isfinite(np.nanmean(w)) else 1.0
+            w = np.where(np.isnan(w), mean_w, w)
+            w = w * (len(w) / max(w.sum(), 1e-12))  # normalise: mean weight = 1
+            out.append(w.tolist())
+        return out
 
     # ---- encode / decode ------------------------------------------------ #
     def encode(self, code: Optional[str]) -> Tuple[int, int, int, int]:
@@ -126,11 +168,18 @@ class CathVocab:
         return [len(m) for m in self.level_token2id]
 
     def to_dict(self) -> dict:
-        return {"level_token2id": self.level_token2id, "n_levels": N_LEVELS}
+        return {
+            "level_token2id": self.level_token2id,
+            "level_counts": self.level_counts,
+            "n_levels": N_LEVELS,
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "CathVocab":
-        return cls(level_token2id=[{k: int(v) for k, v in m.items()} for m in d["level_token2id"]])
+        return cls(
+            level_token2id=[{k: int(v) for k, v in m.items()} for m in d["level_token2id"]],
+            level_counts=d.get("level_counts"),
+        )
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2))

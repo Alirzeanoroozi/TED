@@ -35,6 +35,11 @@ Why this maps onto the Tier-1/Tier-2 recommendations:
 | 1.4 recipe: warmup+cosine, label smoothing, length handling | `train.py` (`LambdaLR`, `label_smoothing`, `LengthBucketedSampler`, chunked ESM embedding) |
 | 2.1 segment-then-classify decoupling | CATH head trains on **ground-truth** domains; uses predicted domains at inference |
 | 2.2 per-residue / per-pair segmentation, emergent domain count | `SegmentationHead` + `clustering.py` |
+| 3.1 class-balanced / focal loss on the CATH head only | `losses.cath_loss` + `--cath_loss_type {ce,focal,class_balanced,cb_focal}` (boundary losses stay on the natural distribution) |
+| 3.2 coarse-to-fine CATH levels | `--cath_level_weights` + `--cath_curriculum_steps` (ramp C→A→T→H) |
+| 3.3 train/benchmark CATH consistency audit | `benchmark/.../audit_cath_consistency.py` |
+| 4.1 decode-strategy ablation (beam) | `CathClassifier.decode` beam over the 4-level hierarchy; `--cath-decode`, `--ablation` |
+| 4.2 metrics broken out by domain count | training eval logs `val_subset_single_*` / `val_subset_multi_*`; benchmark prints 1/2/3/4+/2+ buckets |
 
 ## Modules
 
@@ -82,6 +87,41 @@ python benchmark/chainsaw_cath1363_from_scratch/run_benchmark_two_stage.py \
 Produces the same `predictions.csv` / `per_chain_metrics.csv` / `summary.json` /
 `figure6a.png` / `figure_cath.png` as the baseline runner (it reuses that runner's
 evaluation and plotting code), so results drop straight into the existing comparison.
+
+## CATH long-tail handling (Tier 3) & evaluation (Tier 4)
+
+```bash
+# Class-balanced focal loss on the CATH head ONLY (boundaries stay natural):
+python src/two_stage/train.py ... \
+    --cath_loss_type cb_focal --focal_gamma 2.0 --cb_beta 0.999
+
+# Coarse-to-fine: ramp C->A->T->H over the first 20k steps:
+python src/two_stage/train.py ... --cath_curriculum_steps 20000
+#   or static emphasis on coarse levels:  --cath_level_weights 1.5,1.25,1.0,0.5
+
+# Audit train-vs-benchmark CATH granularity / indexing / vocab coverage:
+python benchmark/chainsaw_cath1363_from_scratch/audit_cath_consistency.py \
+    --train-parquet-dir data/all_parquet
+
+# Decode-strategy ablation (greedy vs beam CATH, shared segmentation):
+python benchmark/chainsaw_cath1363_from_scratch/run_benchmark_two_stage.py \
+    --checkpoint artifacts/two_stage_checkpoint.pt --ablation
+```
+
+- **Why CATH head only:** the old WeightedRandomSampler reweighted whole chains, which
+  distorted boundary learning (why those runs were worse). Here the long-tail fix lives
+  entirely in the CATH cross-entropy (class-balanced weights from train frequencies and/or
+  focal); the residue/pairwise segmentation losses see the natural distribution.
+- **Beam vs grammar-guided:** the two-stage output is always structurally valid by
+  construction (`serialize` emits a parseable string), so the old "grammar-guided" decode is
+  unnecessary — `pred_parse_ok` ≈ 1.0. The remaining decode knobs are the **clustering method**
+  (segmentation) and **greedy vs beam over the CATH hierarchy** (labels). `--ablation` reports both.
+- **Domain-count breakout:** since single-domain was already near Chainsaw parity, training logs
+  `val_subset_multi_*` separately and the benchmark prints 1/2/3/4+/2+ buckets, so multi-domain
+  progress (the bottleneck) is visible.
+- The audit script flags granularity mismatches, index-base mismatches, and low superfamily
+  coverage. On the local benchmark CSV it already shows ~20% of CATH1363 domains are unlabeled
+  (`-`) and all labeled ones are 4-level, 1-based — so train labels must match (4-level, 1-based).
 
 ## Notes / knobs
 

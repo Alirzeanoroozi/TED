@@ -66,6 +66,8 @@ def predict_chopping_star_batch(
     domain_threshold: float = 0.5,
     min_domain_len: int = 20,
     classify_cath: bool = True,
+    cath_decode: str = "greedy",
+    cath_beam_width: int = 4,
     max_len: int | None = None,
 ) -> List[str]:
     preds: List[str] = []
@@ -81,6 +83,8 @@ def predict_chopping_star_batch(
                 domain_threshold=domain_threshold,
                 min_domain_len=min_domain_len,
                 classify_cath=classify_cath,
+                cath_decode=cath_decode,
+                cath_beam_width=cath_beam_width,
             )
         )
     return preds
@@ -94,6 +98,8 @@ def main():
     p.add_argument("--min_domain_len", type=int, default=20)
     p.add_argument("--cluster_method", default="connected_components",
                    choices=["connected_components", "spectral"])
+    p.add_argument("--cath_decode", default="greedy", choices=["greedy", "beam"])
+    p.add_argument("--cath_beam_width", type=int, default=4)
     args = p.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -102,7 +108,8 @@ def main():
         p.error("provide at least one --sequence")
     seqs = args.sequence
     preds = predict_chopping_star_batch(
-        model, seqs, min_domain_len=args.min_domain_len, cluster_method=args.cluster_method
+        model, seqs, min_domain_len=args.min_domain_len, cluster_method=args.cluster_method,
+        cath_decode=args.cath_decode, cath_beam_width=args.cath_beam_width,
     )
     for s, pr in zip(seqs, preds):
         print(f"len={len(s)} -> {pr}")

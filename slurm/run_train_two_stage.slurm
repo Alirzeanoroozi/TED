@@ -96,6 +96,9 @@ TRAIN_CMD=(
     --lr "${LR:-3e-4}"
     --warmup_steps "${WARMUP:-1000}"
     --label_smoothing 0.1
+    --cath_loss_type "${CATH_LOSS_TYPE:-cb_focal}"
+    --cb_beta "${CB_BETA:-0.999}"
+    --cath_curriculum_steps "${CATH_CURRICULUM_STEPS:-0}"
     --benchmark_eval_steps 2000
     --benchmark_eval_subset_size 100
     --benchmark_num_logged_samples 5

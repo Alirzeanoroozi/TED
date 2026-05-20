@@ -141,6 +141,48 @@ class CathClassifier(nn.Module):
 
         return logits, torch.stack(pred_ids, dim=-1)
 
+    @torch.no_grad()
+    def decode(self, feat: torch.Tensor, beam_width: int = 1) -> torch.Tensor:
+        """Decode CATH ids for each domain.
+
+        ``beam_width <= 1`` is greedy argmax-per-level (== forward(parent_ids=None)).
+        ``beam_width > 1`` runs beam search over the 4-level hierarchy, keeping the
+        top-``b`` joint C->A->T->H paths so a wrong-but-confident coarse pick does
+        not force a bad fine pick. Returns ids (N, 4).
+        """
+        h = self.trunk(feat)
+        N = h.shape[0]
+        if N == 0:
+            return feat.new_zeros(0, N_LEVELS, dtype=torch.long)
+        if beam_width <= 1:
+            _, pred_ids = self.forward(feat, parent_ids=None)
+            return pred_ids
+
+        b = beam_width
+        lp0 = F.log_softmax(self.heads[0](h), dim=-1)
+        b0 = min(b, lp0.shape[-1])
+        scores, top0 = lp0.topk(b0, dim=-1)         # (N, b0)
+        beams = [top0]                               # per-level ids, each (N, beam)
+        for level in range(1, N_LEVELS):
+            beam = beams[-1].shape[1]
+            prev = beams[level - 1]                  # (N, beam)
+            cond = self.cond_embeds[level - 1](prev)  # (N, beam, cond_dim)
+            h_exp = h.unsqueeze(1).expand(N, beam, h.shape[-1])
+            logit = self.heads[level](torch.cat([h_exp, cond], dim=-1))  # (N, beam, V)
+            lp = F.log_softmax(logit, dim=-1)
+            total = scores.unsqueeze(-1) + lp        # (N, beam, V)
+            V = total.shape[-1]
+            flat = total.reshape(N, beam * V)
+            keep = min(b, beam * V)
+            scores, idx = flat.topk(keep, dim=-1)    # (N, keep)
+            beam_idx = idx // V                       # which previous beam
+            tok_idx = idx % V                         # token at this level
+            new_beams = [torch.gather(beams[l], 1, beam_idx) for l in range(level)]
+            new_beams.append(tok_idx)
+            beams = new_beams
+        # topk returns descending order, so beam 0 is the best joint path.
+        return torch.stack([beams[l][:, 0] for l in range(N_LEVELS)], dim=-1)
+
 
 # --------------------------------------------------------------------------- #
 # Combined model
@@ -247,7 +289,7 @@ class TwoStageDomainModel(nn.Module):
 
     # ---- inference ------------------------------------------------------ #
     @torch.no_grad()
-    def predict_chopping_star(
+    def _segment_and_featurize(
         self,
         sequences: List[str],
         *,
@@ -255,15 +297,18 @@ class TwoStageDomainModel(nn.Module):
         pair_threshold: float = 0.5,
         domain_threshold: float = 0.5,
         min_domain_len: int = 20,
-        classify_cath: bool = True,
-    ) -> List[str]:
-        self.eval()
+    ) -> List[Tuple[np.ndarray, Optional[torch.Tensor]]]:
+        """Embed + segment + featurize. Returns per sample (assign, domain feats).
+
+        The (expensive) ESM embedding and segmentation run once; CATH decoding can
+        then be applied to the cached features in several ways cheaply.
+        """
         emb, mask = self.embed(sequences)
         residue_logit, pair_logit, trunk_rep = self.seg_head(emb, mask)
         res_prob = torch.sigmoid(residue_logit)
         pair_prob = torch.sigmoid(pair_logit)
 
-        outputs: List[str] = []
+        per_sample: List[Tuple[np.ndarray, Optional[torch.Tensor]]] = []
         for b, seq in enumerate(sequences):
             L = len(seq)
             in_dom = res_prob[b, :L].detach().cpu().numpy()
@@ -274,22 +319,81 @@ class TwoStageDomainModel(nn.Module):
                 min_domain_len=min_domain_len,
             )
             n_dom = int(assign.max())
-            cath_codes: List[Optional[str]] = [None] * n_dom
-
-            if classify_cath and n_dom > 0:
-                domain_masks = []
+            feat = None
+            if n_dom > 0:
+                masks = []
                 for k in range(1, n_dom + 1):
-                    rm = torch.from_numpy(assign == k).to(emb.device)
-                    # pad mask to L dim of emb
                     full = torch.zeros(emb.shape[1], dtype=torch.bool, device=emb.device)
-                    full[:L] = rm
-                    domain_masks.append((b, full))
-                feat = self._domain_features(emb, trunk_rep, domain_masks)
-                _, pred_ids = self.cath_head(feat, parent_ids=None)
-                for k in range(n_dom):
-                    cath_codes[k] = self.cath_vocab.decode(pred_ids[k].tolist())
+                    full[:L] = torch.from_numpy(assign == k).to(emb.device)
+                    masks.append((b, full))
+                feat = self._domain_features(emb, trunk_rep, masks)
+            per_sample.append((assign, feat))
+        return per_sample
 
-            outputs.append(
-                serialize.assignment_and_cath_to_chopping_star(assign, cath_codes)
-            )
+    def _classify_feats(
+        self, feat: Optional[torch.Tensor], cath_decode: str, beam_width: int
+    ) -> List[Optional[str]]:
+        if feat is None or feat.shape[0] == 0:
+            return []
+        bw = beam_width if cath_decode == "beam" else 1
+        pred_ids = self.cath_head.decode(feat, beam_width=bw)
+        return [self.cath_vocab.decode(pred_ids[k].tolist()) for k in range(pred_ids.shape[0])]
+
+    @torch.no_grad()
+    def predict_chopping_star(
+        self,
+        sequences: List[str],
+        *,
+        cluster_method: str = "connected_components",
+        pair_threshold: float = 0.5,
+        domain_threshold: float = 0.5,
+        min_domain_len: int = 20,
+        classify_cath: bool = True,
+        cath_decode: str = "greedy",
+        cath_beam_width: int = 4,
+    ) -> List[str]:
+        self.eval()
+        per_sample = self._segment_and_featurize(
+            sequences, cluster_method=cluster_method, pair_threshold=pair_threshold,
+            domain_threshold=domain_threshold, min_domain_len=min_domain_len,
+        )
+        outputs: List[str] = []
+        for assign, feat in per_sample:
+            n_dom = int(assign.max())
+            if classify_cath and n_dom > 0:
+                codes = self._classify_feats(feat, cath_decode, cath_beam_width)
+            else:
+                codes = [None] * n_dom
+            outputs.append(serialize.assignment_and_cath_to_chopping_star(assign, codes))
         return outputs
+
+    @torch.no_grad()
+    def predict_chopping_star_multi(
+        self,
+        sequences: List[str],
+        modes: List[Tuple[str, str, int]],  # (label, cath_decode, beam_width)
+        *,
+        cluster_method: str = "connected_components",
+        pair_threshold: float = 0.5,
+        domain_threshold: float = 0.5,
+        min_domain_len: int = 20,
+    ) -> dict:
+        """Predict under several CATH-decode modes sharing one segmentation pass.
+
+        Segmentation (hence IoU/boundary metrics) is identical across modes; only
+        the CATH labels differ. Returns {label: [chopping_star, ...]}.
+        """
+        self.eval()
+        per_sample = self._segment_and_featurize(
+            sequences, cluster_method=cluster_method, pair_threshold=pair_threshold,
+            domain_threshold=domain_threshold, min_domain_len=min_domain_len,
+        )
+        results = {label: [] for (label, _, _) in modes}
+        for assign, feat in per_sample:
+            n_dom = int(assign.max())
+            for (label, decode, bw) in modes:
+                codes = self._classify_feats(feat, decode, bw) if n_dom > 0 else []
+                results[label].append(
+                    serialize.assignment_and_cath_to_chopping_star(assign, codes)
+                )
+        return results

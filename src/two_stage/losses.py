@@ -96,23 +96,60 @@ def pairwise_bce_loss(
     return total / max(1, count)
 
 
-def cath_ce_loss(
-    cath_logits: List[torch.Tensor],   # 4 x (N, V_level)
-    targets: torch.Tensor,             # (N, 4) int level ids
+def cath_loss(
+    cath_logits: List[torch.Tensor],          # 4 x (N, V_level)
+    targets: torch.Tensor,                     # (N, 4) int level ids
+    *,
     label_smoothing: float = 0.0,
+    focal_gamma: float = 0.0,
+    class_weights: Optional[List[Optional[torch.Tensor]]] = None,  # per level (V_level,)
     level_weights: Optional[List[float]] = None,
 ) -> torch.Tensor:
+    """Hierarchical CATH loss applied to the CATH head ONLY.
+
+    Long-tail handling lives here (class-balanced ``class_weights`` and/or
+    ``focal_gamma``) so the boundary objective stays on the natural distribution.
+
+    * ``focal_gamma == 0`` -> (optionally class-weighted, label-smoothed) cross-entropy.
+    * ``focal_gamma  > 0`` -> class-weighted focal loss (label smoothing ignored).
+    ``level_weights`` lets coarse levels (C, A) be emphasised over fine ones (H),
+    e.g. for a coarse-to-fine curriculum.
+    """
     if cath_logits is None or targets.numel() == 0:
         return cath_logits[0].sum() * 0.0 if cath_logits else torch.tensor(0.0)
+
     n_levels = len(cath_logits)
     if level_weights is None:
         level_weights = [1.0] * n_levels
+
     total = 0.0
     wsum = 0.0
     for level in range(n_levels):
-        ce = F.cross_entropy(
-            cath_logits[level], targets[:, level], label_smoothing=label_smoothing
-        )
+        logits = cath_logits[level]
+        tgt = targets[:, level]
+        cw = None if class_weights is None else class_weights[level]
+        if focal_gamma and focal_gamma > 0:
+            logp = F.log_softmax(logits, dim=-1)
+            logpt = logp.gather(1, tgt.unsqueeze(1)).squeeze(1)
+            pt = logpt.exp()
+            loss = -((1.0 - pt) ** focal_gamma) * logpt
+            if cw is not None:
+                loss = loss * cw.to(logits.device)[tgt]
+            ce = loss.mean()
+        else:
+            ce = F.cross_entropy(
+                logits, tgt,
+                weight=None if cw is None else cw.to(logits.device),
+                label_smoothing=label_smoothing,
+            )
         total = total + level_weights[level] * ce
         wsum += level_weights[level]
     return total / max(1e-8, wsum)
+
+
+# Backward-compatible alias (plain hierarchical CE).
+def cath_ce_loss(cath_logits, targets, label_smoothing: float = 0.0, level_weights=None):
+    return cath_loss(
+        cath_logits, targets,
+        label_smoothing=label_smoothing, level_weights=level_weights,
+    )
