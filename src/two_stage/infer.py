@@ -68,6 +68,7 @@ def predict_chopping_star_batch(
     classify_cath: bool = True,
     cath_decode: str = "greedy",
     cath_beam_width: int = 4,
+    deletion_fusion_alpha: float = 0.0,
     max_len: int | None = None,
 ) -> List[str]:
     preds: List[str] = []
@@ -85,9 +86,47 @@ def predict_chopping_star_batch(
                 classify_cath=classify_cath,
                 cath_decode=cath_decode,
                 cath_beam_width=cath_beam_width,
+                deletion_fusion_alpha=deletion_fusion_alpha,
             )
         )
     return preds
+
+
+@torch.no_grad()
+def predict_chopping_star_with_aux_batch(
+    model: TwoStageDomainModel,
+    sequences: List[str],
+    *,
+    batch_size: int = 4,
+    cluster_method: str = "connected_components",
+    pair_threshold: float = 0.5,
+    domain_threshold: float = 0.5,
+    min_domain_len: int = 20,
+    classify_cath: bool = True,
+    cath_decode: str = "greedy",
+    cath_beam_width: int = 4,
+    deletion_fusion_alpha: float = 0.0,
+    max_len: int | None = None,
+) -> List[dict]:
+    out: List[dict] = []
+    for i in range(0, len(sequences), batch_size):
+        chunk = sequences[i : i + batch_size]
+        if max_len is not None:
+            chunk = [s[:max_len] for s in chunk]
+        out.extend(
+            model.predict_chopping_star_with_aux(
+                chunk,
+                cluster_method=cluster_method,
+                pair_threshold=pair_threshold,
+                domain_threshold=domain_threshold,
+                min_domain_len=min_domain_len,
+                classify_cath=classify_cath,
+                cath_decode=cath_decode,
+                cath_beam_width=cath_beam_width,
+                deletion_fusion_alpha=deletion_fusion_alpha,
+            )
+        )
+    return out
 
 
 def main():
@@ -100,6 +139,7 @@ def main():
                    choices=["connected_components", "spectral"])
     p.add_argument("--cath_decode", default="greedy", choices=["greedy", "beam"])
     p.add_argument("--cath_beam_width", type=int, default=4)
+    p.add_argument("--deletion_fusion_alpha", type=float, default=0.0)
     args = p.parse_args()
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,6 +150,7 @@ def main():
     preds = predict_chopping_star_batch(
         model, seqs, min_domain_len=args.min_domain_len, cluster_method=args.cluster_method,
         cath_decode=args.cath_decode, cath_beam_width=args.cath_beam_width,
+        deletion_fusion_alpha=args.deletion_fusion_alpha,
     )
     for s, pr in zip(seqs, preds):
         print(f"len={len(s)} -> {pr}")

@@ -42,8 +42,10 @@ data/*
 *.pt
 *.pth
 *.pth.tar
+*.ckpt
 artifacts/
 lightning_logs/
+lightning_logs*/
 
 # Weights & Biases experiment logs
 wandb/
@@ -51,3 +53,7 @@ wandb/
 # Benchmark outputs (generated, not source)
 benchmark/eval_out/
 benchmark/results/
+benchmark/**/results*/
+
+# Generated analysis / figures
+figures/

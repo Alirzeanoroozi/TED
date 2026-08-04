@@ -3,13 +3,16 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=320G
-#SBATCH --time=48:00:00
+#SBATCH --mem=64G
+#SBATCH --time=UNLIMITED
 #SBATCH --partition=kutem_gpu
 #SBATCH --account=kutem
 #SBATCH --gres=gpu:1
+#SBATCH --signal=SIGUSR1@90
+#SBATCH --requeue
 #SBATCH --output=/scratch/esevinc22/new_TED/logs/ted_two_stage_train-%j.out
 #SBATCH --error=/scratch/esevinc22/new_TED/logs/ted_two_stage_train-%j.out
+
 
 set -euo pipefail
 
@@ -80,6 +83,14 @@ if [[ -z "${WANDB_API_KEY:-}" ]]; then
 fi
 
 RESUME_CKPT="${RESUME_CKPT:-}"
+
+# Prefer the rolling last.ckpt over an explicit RESUME_CKPT so slurm auto-requeue
+# picks up the most recent state instead of re-resuming from the stale path baked
+# into the original sbatch --export.
+if [[ -f "${CHECKPOINT_DIR}/last.ckpt" ]]; then
+    echo "Found ${CHECKPOINT_DIR}/last.ckpt — using it for resume (overrides RESUME_CKPT=${RESUME_CKPT:-<unset>})."
+    RESUME_CKPT="${CHECKPOINT_DIR}/last.ckpt"
+fi
 
 TRAIN_CMD=(
     python src/two_stage/train.py

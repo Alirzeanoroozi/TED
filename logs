@@ -1,0 +1,32 @@
+========== Slurm Job ==========
+Job ID: 1131052
+Node: rk02.kuvalar.ku.edu.tr
+Date: Tue Jun  2 22:47:03 +03 2026
+DATA_DIR: /scratch/esevinc22/TED/TED/data/all_parquet
+TORCH_HOME: /scratch/esevinc22/new_TED/torch_cache
+===============================
+Python: /home/esevinc22/.conda/envs/ted/bin/python
+Python 3.10.20
+fair-esm present
+Torch: 2.6.0+cu124  CUDA build: 12.4  available: True
+Tue Jun  2 22:47:28 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.58.03              Driver Version: 595.58.03      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA A100-SXM4-40GB          Off |   00000000:4D:00.0 Off |                    0 |
+| N/A   29C    P0             57W /  400W |       0MiB /  40960MiB |      0%      Default |
+|                                         |                        |             Disabled |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+WANDB_API_KEY is not set. Create /scratch/esevinc22/new_TED/.wandb_env with your W&B credentials.

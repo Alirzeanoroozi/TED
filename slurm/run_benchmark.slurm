@@ -8,8 +8,8 @@
 #SBATCH --partition=kutem_gpu
 #SBATCH --account=kutem
 #SBATCH --gres=gpu:1
-#SBATCH --output=/scratch/esevinc22/new_TED/logs/ted_benchmark-%j.out
-#SBATCH --error=/scratch/esevinc22/new_TED/logs/ted_benchmark-%j.out
+#SBATCH --output=/scratch/esevinc22/new_TED/logs/max_ted_benchmark-%j.out
+#SBATCH --error=/scratch/esevinc22/new_TED/logs/max_ted_benchmark-%j.out
 
 set -euo pipefail
 
@@ -62,6 +62,6 @@ python benchmark/chainsaw_cath1363_from_scratch/run_benchmark.py \
     --data-parquet-dir data/all_parquet \
     --device cuda \
     --benchmark-csv benchmark/chainsaw_cath1363_from_scratch/data/processed_with_cath/chainsaw_cath1363_with_cath_labels.csv \
-    --output-dir benchmark/chainsaw_cath1363_from_scratch/results_with_CATH
+    --output-dir benchmark/chainsaw_cath1363_from_scratch/results_max/
 
 echo "Benchmark finished at $(date)"

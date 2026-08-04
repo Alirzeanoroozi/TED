@@ -42,7 +42,7 @@ from data.dataset_ import _load_paths
 from two_stage.cath_vocab import CathVocab
 from two_stage.dataset import TwoStageDataset, collate_fn, LengthBucketedSampler
 from two_stage.model import TwoStageDomainModel
-from two_stage import losses
+from two_stage import diffusion, losses
 
 try:
     from benchmark.ted_eval import EvalConfig, evaluate_target
@@ -51,6 +51,17 @@ except ImportError:  # pragma: no cover
 
 
 _CATH_RE = re.compile(r"\|\s*([\d.]+)")
+
+
+def parse_batch_limit(value: str) -> int | float:
+    """Parse Lightning batch-limit args as either an int count or float fraction."""
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    out = float(text)
+    if out < 0:
+        raise argparse.ArgumentTypeError("batch limits must be non-negative")
+    return out
 
 
 def resolve_parquet_inputs(data_path: str) -> list[str]:
@@ -197,6 +208,12 @@ class TwoStageLightningModule(pl.LightningModule):
         label_smoothing: float = 0.1,
         residue_loss_weight: float = 1.0,
         pair_loss_weight: float = 1.0,
+        deletion_loss_weight: float = 0.25,
+        artificial_deletion_loss_weight: float = 0.10,
+        artificial_noise_t_max: float = 0.9,
+        artificial_noise_alpha_rate: float = 1.1,
+        artificial_noise_max_insertions: int = 128,
+        artificial_noise_max_len: int = 1022,
         cath_loss_weight: float = 1.0,
         max_pair_len: int = 768,
         cluster_method: str = "connected_components",
@@ -223,6 +240,7 @@ class TwoStageLightningModule(pl.LightningModule):
         )
         self.benchmark_eval_config = EvalConfig(input_indexing="one_based_inclusive")
         self._pair_gen = torch.Generator()
+        self._noise_gen = torch.Generator().manual_seed(12345)
 
         # Register class-balanced weights as buffers so they follow the module to
         # the GPU. Used only when cath_loss_type in {class_balanced, cb_focal}.
@@ -273,14 +291,46 @@ class TwoStageLightningModule(pl.LightningModule):
         mask = mask.to(self.device)
         domains = [(b, rm.to(self.device)) for (b, rm) in batch["domains"]]
         parent_ids = batch["cath_targets"].to(self.device)
+        deletion_budget = ((assign == 0) & mask).sum(dim=1).to(dtype=emb.dtype)
 
-        out = self.model.forward_train(emb, mask, domains, parent_ids)
+        out = self.model.forward_train(
+            emb, mask, domains, parent_ids, deletion_budget=deletion_budget
+        )
 
         res_loss = losses.residue_bce_loss(out["residue_logit"], assign, mask)
         pair_loss = losses.pairwise_bce_loss(
             out["pair_logit"], assign, mask,
             max_pair_len=self.hparams.max_pair_len, generator=self._pair_gen,
         )
+        deletion_loss = losses.deletion_ce_loss(out["deletion_logit"], assign, mask)
+        artificial_deletion_loss = torch.zeros((), device=self.device)
+        if self.training and self.hparams.artificial_deletion_loss_weight > 0:
+            noised = diffusion.make_artificial_insertion_batch(
+                batch["sequences"],
+                assign.detach().cpu(),
+                mask.detach().cpu(),
+                max_noised_len=int(self.hparams.artificial_noise_max_len),
+                t_max=float(self.hparams.artificial_noise_t_max),
+                alpha_rate=float(self.hparams.artificial_noise_alpha_rate),
+                max_insertions=int(self.hparams.artificial_noise_max_insertions),
+                generator=self._noise_gen,
+            )
+            if noised:
+                noised_sequences = [ex.sequence for ex in noised]
+                noised_emb, noised_mask = self.model.embed(noised_sequences)
+                noised_mask = noised_mask.to(self.device)
+                noised_budget = torch.tensor(
+                    [ex.insertions for ex in noised],
+                    dtype=noised_emb.dtype,
+                    device=self.device,
+                )
+                noised_target = diffusion.pad_inserted_masks(noised, device=self.device)
+                noised_deletion_logit = self.model.deletion_logits_from_embeddings(
+                    noised_emb, noised_mask, noised_budget
+                )
+                artificial_deletion_loss = losses.deletion_mask_ce_loss(
+                    noised_deletion_logit, noised_target, noised_mask
+                )
         if out["cath_logits"] is not None and parent_ids.numel() > 0:
             loss_type = self.hparams.cath_loss_type
             use_focal = loss_type in ("focal", "cb_focal")
@@ -298,15 +348,25 @@ class TwoStageLightningModule(pl.LightningModule):
         total = (
             self.hparams.residue_loss_weight * res_loss
             + self.hparams.pair_loss_weight * pair_loss
+            + self.hparams.deletion_loss_weight * deletion_loss
+            + self.hparams.artificial_deletion_loss_weight * artificial_deletion_loss
             + self.hparams.cath_loss_weight * cath_loss
         )
-        return total, {"res": res_loss, "pair": pair_loss, "cath": cath_loss}
+        return total, {
+            "res": res_loss,
+            "pair": pair_loss,
+            "deletion": deletion_loss,
+            "deletion_artificial": artificial_deletion_loss,
+            "cath": cath_loss,
+        }
 
     def training_step(self, batch, batch_idx):
         total, parts = self._compute_losses(batch)
         self.log("train_loss", total, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log("train_res_loss", parts["res"], on_step=True, on_epoch=False)
         self.log("train_pair_loss", parts["pair"], on_step=True, on_epoch=False)
+        self.log("train_deletion_loss", parts["deletion"], on_step=True, on_epoch=False)
+        self.log("train_artificial_deletion_loss", parts["deletion_artificial"], on_step=True, on_epoch=False)
         self.log("train_cath_loss", parts["cath"], on_step=True, on_epoch=False)
         return total
 
@@ -315,6 +375,8 @@ class TwoStageLightningModule(pl.LightningModule):
         self.log("eval_loss", total, on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_res_loss", parts["res"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_pair_loss", parts["pair"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_deletion_loss", parts["deletion"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_artificial_deletion_loss", parts["deletion_artificial"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_cath_loss", parts["cath"], on_step=False, on_epoch=True, sync_dist=True)
         return total
 
@@ -474,9 +536,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--data_parquet_folder", type=str, default="data/all_parquet")
     p.add_argument("--batch_size", type=int, default=4)
     p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--max_steps", type=int, default=-1,
+                   help="Optional trainer max_steps; -1 means Lightning default.")
+    p.add_argument("--limit_train_batches", type=parse_batch_limit, default=1.0,
+                   help="Lightning train batch cap: int count or float fraction.")
+    p.add_argument("--limit_val_batches", type=parse_batch_limit, default=1.0,
+                   help="Lightning validation batch cap: int count or float fraction.")
+    p.add_argument("--val_check_interval", type=parse_batch_limit, default=None,
+                   help="Optional Lightning val_check_interval: int steps or float fraction.")
+    p.add_argument("--check_val_every_n_epoch", type=int, default=1)
     p.add_argument("--max_len", type=int, default=1022)
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--cath_min_count", type=int, default=5)
+    p.add_argument("--val_ratio", type=float, default=0.1)
+    p.add_argument("--test_ratio", type=float, default=0.1)
     # model
     p.add_argument("--esm_model_name", type=str, default="esm2_t33_650M_UR50D")
     p.add_argument("--d_model", type=int, default=512)
@@ -498,6 +571,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--residue_loss_weight", type=float, default=1.0)
     p.add_argument("--pair_loss_weight", type=float, default=1.0)
+    p.add_argument(
+        "--deletion_loss_weight",
+        type=float,
+        default=0.25,
+        help="Auxiliary SCISOR-style deletion CE weight over known non-domain residues.",
+    )
+    p.add_argument(
+        "--artificial_deletion_loss_weight",
+        type=float,
+        default=0.10,
+        help="Training-only deletion CE weight for SCISOR-style artificial insertions.",
+    )
+    p.add_argument("--artificial_noise_t_max", type=float, default=0.9)
+    p.add_argument("--artificial_noise_alpha_rate", type=float, default=1.1)
+    p.add_argument("--artificial_noise_max_insertions", type=int, default=128)
+    p.add_argument("--artificial_noise_max_len", type=int, default=1022)
     p.add_argument("--cath_loss_weight", type=float, default=1.0)
     p.add_argument("--max_pair_len", type=int, default=768)
     # Tier 3: CATH long-tail handling (applied to the CATH head only)
@@ -525,7 +614,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strategy", type=str, default="auto")
     p.add_argument("--save_dir", type=str, default="lightning_logs_two_stage")
     p.add_argument("--save_path", type=str, default="artifacts/two_stage_checkpoint.pt")
+    p.add_argument("--save_every_n_train_steps", type=int, default=0,
+                   help="If >0, maintain save_dir/last.ckpt at this train-step cadence.")
     p.add_argument("--resume_from_checkpoint", type=str, default=None)
+    p.add_argument(
+        "--init_from_checkpoint",
+        type=str,
+        default=None,
+        help="Optional .pt/.ckpt to non-strictly initialize heads before training.",
+    )
     return p
 
 
@@ -545,6 +642,8 @@ def main():
         benchmark_eval_subset_size=args.benchmark_eval_subset_size,
         benchmark_eval_seed=args.benchmark_eval_seed,
         vocab_save_path=vocab_path,
+        val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
     )
     dm.setup()
 
@@ -573,6 +672,12 @@ def main():
         label_smoothing=args.label_smoothing,
         residue_loss_weight=args.residue_loss_weight,
         pair_loss_weight=args.pair_loss_weight,
+        deletion_loss_weight=args.deletion_loss_weight,
+        artificial_deletion_loss_weight=args.artificial_deletion_loss_weight,
+        artificial_noise_t_max=args.artificial_noise_t_max,
+        artificial_noise_alpha_rate=args.artificial_noise_alpha_rate,
+        artificial_noise_max_insertions=args.artificial_noise_max_insertions,
+        artificial_noise_max_len=args.artificial_noise_max_len,
         cath_loss_weight=args.cath_loss_weight,
         max_pair_len=args.max_pair_len,
         cluster_method=args.cluster_method, min_domain_len=args.min_domain_len,
@@ -584,6 +689,40 @@ def main():
         cath_class_weights=cath_class_weights,
     )
 
+    if args.init_from_checkpoint and not args.resume_from_checkpoint:
+        init_path = Path(args.init_from_checkpoint)
+        rank_zero_info(f"Initializing trainable heads from {init_path} (strict=False)")
+        ckpt = torch.load(init_path, map_location="cpu")
+        if "model_state_dict" in ckpt:
+            state = ckpt["model_state_dict"]
+        elif "state_dict" in ckpt:
+            state = {
+                k.removeprefix("model."): v
+                for k, v in ckpt["state_dict"].items()
+                if k.startswith("model.")
+            }
+        else:
+            state = ckpt
+        current = model.model.state_dict()
+        compatible = {}
+        skipped_shape = []
+        for k, v in state.items():
+            if k in current and tuple(current[k].shape) != tuple(v.shape):
+                skipped_shape.append((k, tuple(v.shape), tuple(current[k].shape)))
+                continue
+            compatible[k] = v
+        missing, unexpected = model.model.load_state_dict(compatible, strict=False)
+        head_missing = [k for k in missing if not k.startswith("backbone.")]
+        rank_zero_info(
+            f"Init load complete: missing_head_keys={len(head_missing)} "
+            f"unexpected_keys={len(unexpected)} skipped_shape_keys={len(skipped_shape)}"
+        )
+        if skipped_shape:
+            preview = ", ".join(
+                f"{k}{old}->{new}" for k, old, new in skipped_shape[:6]
+            )
+            rank_zero_info(f"Skipped shape-mismatched init keys: {preview}")
+
     load_dotenv()
     wandb_key = os.getenv("WANDB_API_KEY")
     if wandb_key:
@@ -594,22 +733,43 @@ def main():
         config=vars(args),
     )
 
-    ckpt_cb = ModelCheckpoint(
+    best_ckpt_cb = ModelCheckpoint(
         dirpath=args.save_dir, filename="two_stage-{epoch:02d}-{eval_loss:.4f}",
         monitor="eval_loss", mode="min", save_top_k=1,
+        save_last=False,
     )
+    callbacks = [best_ckpt_cb]
+    if args.save_every_n_train_steps > 0:
+        step_ckpt_cb = ModelCheckpoint(
+            dirpath=args.save_dir,
+            filename="two_stage-step{step}",
+            monitor=None,
+            save_top_k=0,
+            save_last=True,
+            every_n_train_steps=args.save_every_n_train_steps,
+        )
+        callbacks.append(step_ckpt_cb)
     bench_cb = PeriodicBenchmarkEvalCallback(eval_steps=args.benchmark_eval_steps)
+    callbacks.append(bench_cb)
 
-    trainer = pl.Trainer(
+    trainer_kwargs = dict(
         max_epochs=args.epochs,
+        max_steps=args.max_steps,
         accelerator=args.accelerator,
         devices=1 if args.accelerator == "gpu" else "auto",
         strategy=args.strategy,
         logger=wandb_logger,
-        callbacks=[ckpt_cb, bench_cb],
+        callbacks=callbacks,
         gradient_clip_val=args.max_grad_norm,
         precision="bf16-mixed" if args.accelerator == "gpu" else 32,
+        limit_train_batches=args.limit_train_batches,
+        limit_val_batches=args.limit_val_batches,
+        check_val_every_n_epoch=args.check_val_every_n_epoch,
     )
+    if args.val_check_interval is not None:
+        trainer_kwargs["val_check_interval"] = args.val_check_interval
+
+    trainer = pl.Trainer(**trainer_kwargs)
 
     trainer.fit(model, datamodule=dm, ckpt_path=args.resume_from_checkpoint)
 

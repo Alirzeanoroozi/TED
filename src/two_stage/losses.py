@@ -96,6 +96,44 @@ def pairwise_bce_loss(
     return total / max(1, count)
 
 
+def deletion_mask_ce_loss(
+    deletion_logit: torch.Tensor,  # (B, L)
+    target_mask: torch.Tensor,     # (B, L) bool, True=deletable/inserted
+    mask: torch.Tensor,            # (B, L) bool, True=real residue
+) -> torch.Tensor:
+    """Cross-entropy/KL objective over a target deletion mask.
+
+    Each sample's target distribution is uniform over ``target_mask`` positions.
+    Samples with no target positions are ignored.  This is useful for both real
+    TED non-domain residues and artificial SCISOR-style inserted residues.
+    """
+    B, _ = deletion_logit.shape
+    sample_losses = []
+    for b in range(B):
+        valid = mask[b]
+        target = valid & target_mask[b]
+        if target.sum() == 0:
+            continue
+        logp = F.log_softmax(deletion_logit[b][valid], dim=0)
+        target_valid = target[valid]
+        # Equivalent to CE(uniform(target_positions), p_theta); differs from
+        # KL only by the constant entropy of the target distribution.
+        sample_losses.append(-logp[target_valid].mean())
+
+    if not sample_losses:
+        return deletion_logit.sum() * 0.0
+    return torch.stack(sample_losses).mean()
+
+
+def deletion_ce_loss(
+    deletion_logit: torch.Tensor,  # (B, L)
+    assign: torch.Tensor,          # (B, L) int, 0=linker/NDR/non-domain
+    mask: torch.Tensor,            # (B, L) bool, True=real residue
+) -> torch.Tensor:
+    """Supervised deletion loss over known TED non-domain residues."""
+    return deletion_mask_ce_loss(deletion_logit, assign == 0, mask)
+
+
 def cath_loss(
     cath_logits: List[torch.Tensor],          # 4 x (N, V_level)
     targets: torch.Tensor,                     # (N, 4) int level ids
