@@ -1109,3 +1109,222 @@ p^*_i \propto
 
 6. For closer SCISOR fidelity, implement alignment-posterior targets for
    artificial insertion examples rather than only the exact inserted mask.
+
+## 13. V2 Implementation Addendum
+
+This addendum records the follow-up implementation from the v2 deletion-diffusion
+spec.
+
+### 13.1 Reproducibility and Model Selection Guardrails
+
+Training now exposes:
+
+```text
+--seed
+--shuffle_seed
+```
+
+`src/two_stage/train.py` calls:
+
+```python
+pl.seed_everything(args.seed, workers=True)
+```
+
+before datamodule/model construction. The pairwise subsampling generator and the
+diffusion/noising generator are derived from this seed:
+
+```text
+pair generator seed  = seed + 101
+noise generator seed = seed + 202
+```
+
+The training split order remains controlled independently by `--shuffle_seed`.
+Both values are saved through the Lightning hyperparameters and W&B config.
+
+Checkpoint selection no longer monitors `eval_loss`. The best checkpoint now
+monitors the held-out validation-subset multi-domain segmentation metric:
+
+```text
+monitor = val_subset_multi_iou_chain
+mode    = max
+```
+
+The CATH1363 Chainsaw benchmark remains a final/monitoring benchmark and should
+not be used to choose checkpoints.
+
+### 13.2 Empirical Linker-Dropout Forward Process
+
+The new v2 forward noising helper is:
+
+```text
+src/two_stage/diffusion.py::make_linker_dropout_batch
+```
+
+For a sequence with residue-domain assignment `a_i`, valid mask `m_i`, and true
+linker/non-domain set
+
+```math
+D = \{ i : a_i = 0 \land m_i = 1 \},
+```
+
+the empirical noising process samples:
+
+```math
+\rho \sim \mathrm{Uniform}(0, 1)
+```
+
+and marks
+
+```math
+k = \lfloor \rho |D| \rfloor
+```
+
+true linker residues as already deleted. With `R = D \setminus D_{deleted}`,
+the remaining deletion budget is:
+
+```math
+S_t = |R|.
+```
+
+The training target is the uniform posterior over the remaining true linker
+positions:
+
+```math
+q(i \mid x_t, S_t) =
+\begin{cases}
+1 / |R|, & i \in R \\
+0,       & \text{otherwise}
+\end{cases}
+```
+
+and the deletion head is trained with:
+
+```math
+\mathcal{L}_{linker-dropout}
+= -\frac{1}{|R|}\sum_{i \in R}
+\log p_\theta(i \mid x_t, S_t).
+```
+
+This is the cheap TED-style implementation: tensor length is not physically
+changed. Already-deleted linker residues are removed from the deletion softmax
+mask, and the existing ESM/trunk features are reused.
+
+The loss is controlled by:
+
+```text
+--linker_dropout_loss_weight  # default 0.25
+```
+
+and is logged as:
+
+```text
+train_linker_dropout_deletion_loss
+eval_linker_dropout_deletion_loss
+```
+
+The validation value is zero by design because this stochastic objective is
+training-only.
+
+### 13.3 Deletion Head Feature Ablation
+
+The deletion head now supports:
+
+```text
+--deletion_head_input trunk
+--deletion_head_input esm_trunk
+```
+
+`trunk` reproduces the previous v1 behavior:
+
+```math
+h_i = z_i
+```
+
+where `z_i` is the segmentation trunk representation.
+
+`esm_trunk` concatenates raw frozen ESM features and the segmentation trunk
+features:
+
+```math
+h_i = W [e_i ; z_i],
+```
+
+then applies the same budget-conditioned residual normalization:
+
+```math
+\tilde h_i =
+\mathrm{LayerNorm}(h_i + c(S_t, L_t)).
+```
+
+The budget embedding still uses:
+
+```math
+c(S_t, L_t) =
+\mathrm{MLP}([\log(1 + S_t), S_t/L_t]).
+```
+
+This addresses the v1 diagnosis that the deletion head saw nearly the same
+features as the residue classifier and could collapse into an opposite-signed
+copy of the residue head.
+
+### 13.4 Benchmark Budget Diagnostics
+
+`run_benchmark_two_stage.py` now records:
+
+```text
+true_deletion_budget
+pred_deletion_budget
+budget_abs_error
+budget_pearson
+```
+
+The predicted budget is computed from the unfused residue probability:
+
+```math
+\hat S = \sum_i (1 - p_\theta(domain_i)).
+```
+
+The true budget is the number of CATH1363 residues not covered by a reference
+domain. Groupwise Pearson correlation between `S` and `S_hat` is included in
+`summary.json` under `deletion_metrics`.
+
+### 13.5 Task-1 Ablation Infrastructure
+
+Two Slurm array scripts were added:
+
+```text
+slurm/run_train_two_stage_diffusion_ablation_v2.slurm
+slurm/run_benchmark_two_stage_diffusion_ablation_v2.slurm
+```
+
+The six training jobs implement the requested three-arm, two-seed ablation:
+
+| arm | seeds | deletion loss | artificial insertion loss | linker dropout loss |
+| --- | --- | --- | --- | --- |
+| A no diffusion | 0, 1 | 0.00 | 0.00 | 0.00 |
+| B real deletion only | 0, 1 | 0.25 | 0.00 | 0.00 |
+| C real + artificial current | 0, 1 | 0.25 | 0.10 | 0.00 |
+
+The benchmark array evaluates all six checkpoints with:
+
+```text
+--deletion-fusion-alpha 0.0
+```
+
+and writes:
+
+```text
+benchmark/chainsaw_cath1363_from_scratch/results_ablation_A_seed0/
+benchmark/chainsaw_cath1363_from_scratch/results_ablation_A_seed1/
+...
+```
+
+The comparison table utility was added at:
+
+```text
+benchmark/chainsaw_cath1363_from_scratch/compare_runs.py
+```
+
+It accepts one or more `summary.json` paths, emits a Markdown table over
+overall/single/multi metrics, includes Gen1 and Chainsaw reference rows, and
+flags overlapping confidence intervals between supplied runs.

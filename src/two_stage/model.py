@@ -96,11 +96,23 @@ class DeletionDiffusionHead(nn.Module):
     def __init__(
         self,
         d_model: int,
+        esm_dim: Optional[int] = None,
+        input_mode: str = "trunk",
         cond_dim: int = 128,
         hidden: int = 256,
         dropout: float = 0.1,
     ):
         super().__init__()
+        if input_mode not in {"trunk", "esm_trunk"}:
+            raise ValueError(f"unknown deletion head input_mode={input_mode!r}")
+        if input_mode == "esm_trunk" and esm_dim is None:
+            raise ValueError("esm_dim is required when input_mode='esm_trunk'")
+        self.input_mode = input_mode
+        self.input_proj = (
+            nn.Linear(int(esm_dim) + d_model, d_model)
+            if input_mode == "esm_trunk"
+            else nn.Identity()
+        )
         self.budget_embed = nn.Sequential(
             nn.Linear(2, cond_dim),
             nn.SiLU(),
@@ -124,6 +136,7 @@ class DeletionDiffusionHead(nn.Module):
         trunk_rep: torch.Tensor,
         mask: torch.Tensor,
         deletion_budget: Optional[torch.Tensor] = None,
+        emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Return deletion logits with shape ``(B, L)``.
 
@@ -135,6 +148,10 @@ class DeletionDiffusionHead(nn.Module):
         if deletion_budget is None:
             deletion_budget = trunk_rep.new_zeros(B)
         deletion_budget = deletion_budget.to(device=trunk_rep.device, dtype=trunk_rep.dtype)
+        if self.input_mode == "esm_trunk":
+            if emb is None:
+                raise ValueError("emb is required for deletion head input_mode='esm_trunk'")
+            trunk_rep = self.input_proj(torch.cat([emb, trunk_rep], dim=-1))
 
         lengths = mask.sum(dim=1).clamp_min(1).to(dtype=trunk_rep.dtype)
         budget_features = torch.stack(
@@ -273,6 +290,7 @@ class TwoStageDomainModel(nn.Module):
         esm_chunk_size: int = 1022,
         esm_chunk_overlap: int = 256,
         esm_dtype: str = "bf16",
+        deletion_head_input: str = "trunk",
     ):
         super().__init__()
         self.cath_vocab = cath_vocab
@@ -288,7 +306,12 @@ class TwoStageDomainModel(nn.Module):
             num_layers=num_seg_layers, dim_feedforward=dim_feedforward,
             dropout=dropout, pair_dim=pair_dim,
         )
-        self.deletion_head = DeletionDiffusionHead(d_model=d_model, dropout=dropout)
+        self.deletion_head = DeletionDiffusionHead(
+            d_model=d_model,
+            esm_dim=esm_dim,
+            input_mode=deletion_head_input,
+            dropout=dropout,
+        )
         # CATH feature = pooled ESM embedding (PLM semantics) ++ pooled trunk rep.
         self.cath_feat_dim = esm_dim + d_model
         self.cath_head = CathClassifier(
@@ -320,7 +343,17 @@ class TwoStageDomainModel(nn.Module):
     ) -> torch.Tensor:
         """Run only the trunk + deletion head, avoiding the O(L^2) pair head."""
         trunk_rep = self.seg_head.encode(emb, mask)
-        return self.deletion_head(trunk_rep, mask, deletion_budget)
+        return self.deletion_logits_from_representations(emb, trunk_rep, mask, deletion_budget)
+
+    def deletion_logits_from_representations(
+        self,
+        emb: torch.Tensor,
+        trunk_rep: torch.Tensor,
+        mask: torch.Tensor,
+        deletion_budget: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run the deletion head on already-computed ESM/trunk features."""
+        return self.deletion_head(trunk_rep, mask, deletion_budget, emb=emb)
 
     @staticmethod
     def _masked_pool(feats: torch.Tensor, res_mask: torch.Tensor) -> torch.Tensor:
@@ -359,7 +392,9 @@ class TwoStageDomainModel(nn.Module):
         CATH head learns classification decoupled from segmentation errors.
         """
         residue_logit, pair_logit, trunk_rep = self.seg_head(emb, mask)
-        deletion_logit = self.deletion_head(trunk_rep, mask, deletion_budget)
+        deletion_logit = self.deletion_logits_from_representations(
+            emb, trunk_rep, mask, deletion_budget
+        )
         if domains:
             feat = self._domain_features(emb, trunk_rep, domains)
             cath_logits, _ = self.cath_head(feat, parent_ids=parent_ids)
@@ -400,7 +435,9 @@ class TwoStageDomainModel(nn.Module):
 
         if deletion_fusion_alpha > 0 or return_aux:
             deletion_budget = ((1.0 - res_prob_base) * mask.float()).sum(dim=1)
-            deletion_logit = self.deletion_head(trunk_rep, mask, deletion_budget)
+            deletion_logit = self.deletion_logits_from_representations(
+                emb, trunk_rep, mask, deletion_budget
+            )
             deletion_evidence = diffusion.centered_deletion_evidence(deletion_logit, mask)
             if deletion_fusion_alpha > 0:
                 fused_residue_logit = residue_logit - deletion_fusion_alpha * deletion_evidence
@@ -585,7 +622,9 @@ class TwoStageDomainModel(nn.Module):
             residue_logit, _, trunk_rep = self.seg_head(emb, mask)
             res_prob = torch.sigmoid(residue_logit)
             budget = torch.tensor([num_deletions - step], dtype=emb.dtype, device=emb.device)
-            deletion_logit = self.deletion_head(trunk_rep, mask, budget)
+            deletion_logit = self.deletion_logits_from_representations(
+                emb, trunk_rep, mask, budget
+            )
             valid = mask[0, : len(current)]
             scores = deletion_logit[0, : len(current)].masked_fill(~valid, -torch.inf)
             if temperature and temperature > 0:

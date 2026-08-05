@@ -10,6 +10,7 @@ sampled insertion mask as the deletion-posterior target for v1 training.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import List, Sequence
 
 import torch
@@ -141,6 +142,45 @@ def make_artificial_insertion_batch(
             )
         )
     return out
+
+
+def make_linker_dropout_batch(
+    assign: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    generator: torch.Generator | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Empirical TED forward process over real linker residues.
+
+    For each sequence, let ``D = {i: assign_i == 0}`` under the valid residue
+    mask.  Draw ``rho ~ U(0, 1)``, mark ``floor(rho * |D|)`` linker residues as
+    already deleted, and train the denoiser to put a uniform deletion posterior
+    over the remaining linker residues.
+
+    The cheap v2 implementation keeps tensor length fixed: already-deleted
+    residues are removed only from the softmax mask, so the main ESM/trunk pass
+    can be reused.
+    """
+    if assign.shape != mask.shape:
+        raise ValueError(f"assign and mask must have the same shape, got {assign.shape} and {mask.shape}")
+    kept_mask = mask.clone().bool()
+    target_mask = torch.zeros_like(kept_mask, dtype=torch.bool)
+    budget = torch.zeros(assign.shape[0], device=assign.device, dtype=torch.float32)
+
+    for b in range(assign.shape[0]):
+        linker = torch.nonzero((assign[b] == 0) & mask[b], as_tuple=False).squeeze(-1)
+        n = int(linker.numel())
+        if n <= 0:
+            continue
+        rho = float(torch.rand((), generator=generator).item())
+        n_deleted = min(n - 1, int(math.floor(rho * n)))
+        perm = torch.randperm(n, generator=generator).to(linker.device)
+        already_deleted = linker[perm[:n_deleted]]
+        remaining = linker[perm[n_deleted:]]
+        kept_mask[b, already_deleted] = False
+        target_mask[b, remaining] = True
+        budget[b] = float(remaining.numel())
+    return kept_mask, target_mask, budget
 
 
 def pad_inserted_masks(

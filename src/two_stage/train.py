@@ -209,6 +209,7 @@ class TwoStageLightningModule(pl.LightningModule):
         residue_loss_weight: float = 1.0,
         pair_loss_weight: float = 1.0,
         deletion_loss_weight: float = 0.25,
+        linker_dropout_loss_weight: float = 0.25,
         artificial_deletion_loss_weight: float = 0.10,
         artificial_noise_t_max: float = 0.9,
         artificial_noise_alpha_rate: float = 1.1,
@@ -219,6 +220,8 @@ class TwoStageLightningModule(pl.LightningModule):
         cluster_method: str = "connected_components",
         min_domain_len: int = 20,
         benchmark_num_logged_samples: int = 5,
+        deletion_head_input: str = "trunk",
+        seed: int = 0,
         # ---- Tier 3: CATH long-tail handling (CATH head only) ----
         cath_loss_type: str = "ce",          # ce | focal | class_balanced | cb_focal
         focal_gamma: float = 2.0,
@@ -237,10 +240,11 @@ class TwoStageLightningModule(pl.LightningModule):
             cath_hidden=cath_hidden, cath_cond_dim=cath_cond_dim,
             esm_chunk_size=esm_chunk_size, esm_chunk_overlap=esm_chunk_overlap,
             esm_dtype=esm_dtype,
+            deletion_head_input=deletion_head_input,
         )
         self.benchmark_eval_config = EvalConfig(input_indexing="one_based_inclusive")
-        self._pair_gen = torch.Generator()
-        self._noise_gen = torch.Generator().manual_seed(12345)
+        self._pair_gen = torch.Generator().manual_seed(int(seed) + 101)
+        self._noise_gen = torch.Generator().manual_seed(int(seed) + 202)
 
         # Register class-balanced weights as buffers so they follow the module to
         # the GPU. Used only when cath_loss_type in {class_balanced, cb_focal}.
@@ -303,6 +307,21 @@ class TwoStageLightningModule(pl.LightningModule):
             max_pair_len=self.hparams.max_pair_len, generator=self._pair_gen,
         )
         deletion_loss = losses.deletion_ce_loss(out["deletion_logit"], assign, mask)
+        linker_dropout_loss = torch.zeros((), device=self.device)
+        if self.training and self.hparams.linker_dropout_loss_weight > 0:
+            kept_mask, target_mask, linker_budget = diffusion.make_linker_dropout_batch(
+                assign, mask, generator=self._noise_gen
+            )
+            if target_mask.any():
+                linker_dropout_logit = self.model.deletion_logits_from_representations(
+                    emb,
+                    out["trunk_rep"],
+                    kept_mask,
+                    linker_budget.to(device=self.device, dtype=emb.dtype),
+                )
+                linker_dropout_loss = losses.deletion_mask_ce_loss(
+                    linker_dropout_logit, target_mask, kept_mask
+                )
         artificial_deletion_loss = torch.zeros((), device=self.device)
         if self.training and self.hparams.artificial_deletion_loss_weight > 0:
             noised = diffusion.make_artificial_insertion_batch(
@@ -349,6 +368,7 @@ class TwoStageLightningModule(pl.LightningModule):
             self.hparams.residue_loss_weight * res_loss
             + self.hparams.pair_loss_weight * pair_loss
             + self.hparams.deletion_loss_weight * deletion_loss
+            + self.hparams.linker_dropout_loss_weight * linker_dropout_loss
             + self.hparams.artificial_deletion_loss_weight * artificial_deletion_loss
             + self.hparams.cath_loss_weight * cath_loss
         )
@@ -356,6 +376,7 @@ class TwoStageLightningModule(pl.LightningModule):
             "res": res_loss,
             "pair": pair_loss,
             "deletion": deletion_loss,
+            "deletion_linker_dropout": linker_dropout_loss,
             "deletion_artificial": artificial_deletion_loss,
             "cath": cath_loss,
         }
@@ -366,6 +387,7 @@ class TwoStageLightningModule(pl.LightningModule):
         self.log("train_res_loss", parts["res"], on_step=True, on_epoch=False)
         self.log("train_pair_loss", parts["pair"], on_step=True, on_epoch=False)
         self.log("train_deletion_loss", parts["deletion"], on_step=True, on_epoch=False)
+        self.log("train_linker_dropout_deletion_loss", parts["deletion_linker_dropout"], on_step=True, on_epoch=False)
         self.log("train_artificial_deletion_loss", parts["deletion_artificial"], on_step=True, on_epoch=False)
         self.log("train_cath_loss", parts["cath"], on_step=True, on_epoch=False)
         return total
@@ -376,6 +398,7 @@ class TwoStageLightningModule(pl.LightningModule):
         self.log("eval_res_loss", parts["res"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_pair_loss", parts["pair"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_deletion_loss", parts["deletion"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_linker_dropout_deletion_loss", parts["deletion_linker_dropout"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_artificial_deletion_loss", parts["deletion_artificial"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_cath_loss", parts["cath"], on_step=False, on_epoch=True, sync_dist=True)
         return total
@@ -502,6 +525,11 @@ class PeriodicBenchmarkEvalCallback(Callback):
             if metrics and trainer.logger is not None:
                 table = metrics.pop("benchmark_samples_table", None)
                 trainer.logger.log_metrics(metrics, step=step)
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        trainer.callback_metrics[key] = torch.tensor(
+                            float(value), device=pl_module.device
+                        )
                 if table is not None and isinstance(trainer.logger, WandbLogger):
                     trainer.logger.experiment.log({"benchmark_samples": table}, step=step)
                 msg = (
@@ -550,6 +578,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cath_min_count", type=int, default=5)
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--test_ratio", type=float, default=0.1)
+    p.add_argument("--shuffle_seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=0)
     # model
     p.add_argument("--esm_model_name", type=str, default="esm2_t33_650M_UR50D")
     p.add_argument("--d_model", type=int, default=512)
@@ -560,6 +590,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pair_dim", type=int, default=128)
     p.add_argument("--cath_hidden", type=int, default=512)
     p.add_argument("--cath_cond_dim", type=int, default=64)
+    p.add_argument("--deletion_head_input", type=str, default="esm_trunk",
+                   choices=["trunk", "esm_trunk"],
+                   help="Features consumed by the deletion diffusion head.")
     p.add_argument("--esm_dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     p.add_argument("--esm_chunk_size", type=int, default=1022)
     p.add_argument("--esm_chunk_overlap", type=int, default=256)
@@ -576,6 +609,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.25,
         help="Auxiliary SCISOR-style deletion CE weight over known non-domain residues.",
+    )
+    p.add_argument(
+        "--linker_dropout_loss_weight",
+        type=float,
+        default=0.25,
+        help="Training-only empirical deletion-diffusion CE over randomly retained true linker residues.",
     )
     p.add_argument(
         "--artificial_deletion_loss_weight",
@@ -628,6 +667,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main():
     args = build_parser().parse_args()
+    pl.seed_everything(args.seed, workers=True)
+    rank_zero_info(f"Resolved training seed: {args.seed}")
 
     if args.accelerator == "gpu" and not torch.cuda.is_available():
         raise RuntimeError("accelerator=gpu requested but CUDA is not available.")
@@ -644,6 +685,7 @@ def main():
         vocab_save_path=vocab_path,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
+        shuffle_seed=args.shuffle_seed,
     )
     dm.setup()
 
@@ -673,6 +715,7 @@ def main():
         residue_loss_weight=args.residue_loss_weight,
         pair_loss_weight=args.pair_loss_weight,
         deletion_loss_weight=args.deletion_loss_weight,
+        linker_dropout_loss_weight=args.linker_dropout_loss_weight,
         artificial_deletion_loss_weight=args.artificial_deletion_loss_weight,
         artificial_noise_t_max=args.artificial_noise_t_max,
         artificial_noise_alpha_rate=args.artificial_noise_alpha_rate,
@@ -682,6 +725,8 @@ def main():
         max_pair_len=args.max_pair_len,
         cluster_method=args.cluster_method, min_domain_len=args.min_domain_len,
         benchmark_num_logged_samples=args.benchmark_num_logged_samples,
+        deletion_head_input=args.deletion_head_input,
+        seed=args.seed,
         cath_loss_type=args.cath_loss_type,
         focal_gamma=args.focal_gamma,
         cath_level_weights=level_weights,
@@ -734,11 +779,17 @@ def main():
     )
 
     best_ckpt_cb = ModelCheckpoint(
-        dirpath=args.save_dir, filename="two_stage-{epoch:02d}-{eval_loss:.4f}",
-        monitor="eval_loss", mode="min", save_top_k=1,
+        dirpath=args.save_dir,
+        filename="two_stage-{epoch:02d}-step{step}-multi_iou{val_subset_multi_iou_chain:.4f}",
+        monitor="val_subset_multi_iou_chain",
+        mode="max",
+        save_top_k=1,
         save_last=False,
+        every_n_train_steps=args.benchmark_eval_steps if args.benchmark_eval_steps > 0 else 0,
+        save_on_train_epoch_end=False,
     )
-    callbacks = [best_ckpt_cb]
+    bench_cb = PeriodicBenchmarkEvalCallback(eval_steps=args.benchmark_eval_steps)
+    callbacks = [bench_cb, best_ckpt_cb]
     if args.save_every_n_train_steps > 0:
         step_ckpt_cb = ModelCheckpoint(
             dirpath=args.save_dir,
@@ -749,9 +800,6 @@ def main():
             every_n_train_steps=args.save_every_n_train_steps,
         )
         callbacks.append(step_ckpt_cb)
-    bench_cb = PeriodicBenchmarkEvalCallback(eval_steps=args.benchmark_eval_steps)
-    callbacks.append(bench_cb)
-
     trainer_kwargs = dict(
         max_epochs=args.epochs,
         max_steps=args.max_steps,

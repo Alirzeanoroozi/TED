@@ -43,6 +43,7 @@ def load_two_stage(checkpoint_path: str | Path, device: torch.device | str = "cp
         esm_chunk_size=args.get("esm_chunk_size", 1022),
         esm_chunk_overlap=args.get("esm_chunk_overlap", 256),
         esm_dtype=args.get("esm_dtype", "bf16"),
+        deletion_head_input=args.get("deletion_head_input", "trunk"),
     )
     missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
     # Backbone keys are intentionally absent; warn only about head mismatches.

@@ -210,6 +210,7 @@ def add_deletion_metrics(
             rows.append({})
             continue
         scores = np.asarray(aux["deletion_score"], dtype=float)
+        base_residue_prob = np.asarray(aux.get("base_residue_prob", []), dtype=float)
         n = len(scores)
         parsed = parse_chopping_star(str(bench_row["label"]))
         assign = residue_assignment(parsed.domains, n)
@@ -223,6 +224,11 @@ def add_deletion_metrics(
             enrichment = precision_top / bg
         else:
             enrichment = float("nan")
+        pred_budget = (
+            float(np.sum(1.0 - base_residue_prob[:n]))
+            if len(base_residue_prob) >= n
+            else float("nan")
+        )
         rows.append(
             {
                 "non_domain_auroc": binary_auroc(non_domain, scores),
@@ -230,6 +236,9 @@ def add_deletion_metrics(
                 "boundary_f1": topk_f1(boundary, scores),
                 "linker_enrichment_topk": enrichment,
                 "non_domain_fraction": bg,
+                "true_deletion_budget": float(k_linker),
+                "pred_deletion_budget": pred_budget,
+                "budget_abs_error": abs(pred_budget - float(k_linker)) if np.isfinite(pred_budget) else float("nan"),
             }
         )
     extra = pd.DataFrame(rows)
@@ -246,7 +255,13 @@ def _metric_mean_ci(metrics_df: pd.DataFrame, col: str, mask: pd.Series) -> dict
 
 
 def deletion_summary(metrics_df: pd.DataFrame) -> dict:
-    metric_cols = ["non_domain_auroc", "non_domain_auprc", "boundary_f1", "linker_enrichment_topk"]
+    metric_cols = [
+        "non_domain_auroc",
+        "non_domain_auprc",
+        "boundary_f1",
+        "linker_enrichment_topk",
+        "budget_abs_error",
+    ]
     out = {}
     groups = {
         "overall": metrics_df["n_domains"] >= 1,
@@ -256,6 +271,14 @@ def deletion_summary(metrics_df: pd.DataFrame) -> dict:
     }
     for name, mask in groups.items():
         out[name] = {col: _metric_mean_ci(metrics_df, col, mask) for col in metric_cols if col in metrics_df}
+        if {"true_deletion_budget", "pred_deletion_budget"}.issubset(metrics_df.columns):
+            sub = metrics_df.loc[mask, ["true_deletion_budget", "pred_deletion_budget"]].astype(float)
+            sub = sub.replace([np.inf, -np.inf], np.nan).dropna()
+            if len(sub) >= 2 and sub["true_deletion_budget"].std() > 0 and sub["pred_deletion_budget"].std() > 0:
+                corr = float(np.corrcoef(sub["true_deletion_budget"], sub["pred_deletion_budget"])[0, 1])
+            else:
+                corr = float("nan")
+            out[name]["budget_pearson"] = {"mean": corr, "ci_lo": float("nan"), "ci_hi": float("nan"), "n": int(len(sub))}
     return out
 
 
