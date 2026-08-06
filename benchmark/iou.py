@@ -39,18 +39,21 @@ def chain_iou(ground_truth_domains, predicted_domains):
     cost_matrix = -iou_matrix
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-    # Paired IoUs
-    paired_ious = [iou_matrix[i, j] for i, j in zip(row_ind, col_ind) if i < n_gt and j < n_pred]
-
     # Compute weighted IoU_chain
     domain_sizes = [len(gt) for gt in ground_truth_domains]
     total_residues = sum(domain_sizes)
-    weights = np.array(domain_sizes) / total_residues
-
-    iou_chain = sum(p * w for p, w in zip(paired_ious, weights))
+    if total_residues > 0:
+        iou_chain = sum(
+            float(iou_matrix[i, j]) * (domain_sizes[i] / total_residues)
+            for i, j in zip(row_ind, col_ind)
+        )
+    else:
+        iou_chain = 0.0
 
     # Correctly parsed domains (IoU >= 0.8)
-    correct_count = sum(1 for p in paired_ious if p >= 0.8)
+    correct_count = sum(
+        1 for i, j in zip(row_ind, col_ind) if float(iou_matrix[i, j]) >= 0.8
+    )
     correct_prop = correct_count / n_gt if n_gt > 0 else 0.0
 
     return iou_chain, correct_prop

@@ -138,6 +138,55 @@ def zero_based_to_ted_label(chopping):
     return " * ".join(ted_domains)
 
 
+def reconstruct_authoritative_chopping(true_dbounds, true_dnames):
+    """Rebuild CHAINSAW truth from segment bounds and domain identities.
+
+    ``true_dbounds`` contains one zero-based inclusive segment per pipe-delimited
+    entry. ``true_dnames`` contains the corresponding CATH domain name. Repeated
+    names identify discontinuous segments belonging to the same domain.  The
+    legacy ``true_chopping`` column is not authoritative for all CATH1363 rows
+    and must not be used to infer this grouping.
+
+    Returns
+    -------
+    chopping, domain_names
+        A zero-based inclusive chopping string and unique domain names in their
+        first-seen order.
+    """
+
+    bounds = [part.strip() for part in str(true_dbounds).split("|") if part.strip()]
+    names = [part.strip() for part in str(true_dnames).split("|") if part.strip()]
+    if not bounds or not names:
+        raise ValueError("missing true_dbounds or true_dnames")
+    if len(bounds) != len(names):
+        raise ValueError(
+            "true_dbounds/true_dnames length mismatch: {} != {}".format(
+                len(bounds), len(names)
+            )
+        )
+
+    grouped = {}
+    for raw_bound, domain_name in zip(bounds, names):
+        segments = []
+        for raw_segment in raw_bound.split("_"):
+            raw_segment = raw_segment.strip()
+            match = RANGE_RE.match(raw_segment)
+            if not match:
+                raise ValueError("invalid true_dbounds segment {!r}".format(raw_segment))
+            start, end = map(int, match.groups())
+            if start > end:
+                raise ValueError("descending true_dbounds segment {!r}".format(raw_segment))
+            segments.append((start, end))
+        grouped.setdefault(domain_name, []).extend(segments)
+
+    domain_names = list(grouped)
+    chopping_domains = []
+    for domain_name in domain_names:
+        segments = sorted(grouped[domain_name], key=lambda pair: (pair[0], pair[1]))
+        chopping_domains.append("_".join("{}-{}".format(s, e) for s, e in segments))
+    return "|".join(chopping_domains), domain_names
+
+
 def max_required_length(chopping):
     max_end = 0
     for domain in parse_zero_based_chopping(chopping):
@@ -214,6 +263,7 @@ def prepare(args):
     excluded = []
     pdb_downloads = Counter()
     domain_groups = Counter()
+    truth_audit = Counter()
 
     with args.raw_csv.open(newline="") as handle:
         reader = csv.DictReader(handle)
@@ -228,9 +278,11 @@ def prepare(args):
                 excluded.append({"chain_id": chain_id, "reason": str(exc)})
                 continue
 
-            true_chopping = (row.get("true_chopping") or "").strip()
+            legacy_true_chopping = (row.get("true_chopping") or "").strip()
+            true_dbounds = (row.get("true_dbounds") or "").strip()
+            true_dnames = (row.get("true_dnames") or "").strip()
             n_domains_text = (row.get("n_domains") or "").strip()
-            if not present(true_chopping) or not present(n_domains_text):
+            if not present(true_dbounds) or not present(true_dnames) or not present(n_domains_text):
                 excluded.append(
                     {
                         "chain_id": chain_id,
@@ -240,12 +292,21 @@ def prepare(args):
                 continue
 
             try:
-                n_domains = int(float(n_domains_text))
+                reported_n_domains = int(float(n_domains_text))
+                true_chopping, domain_names = reconstruct_authoritative_chopping(
+                    true_dbounds, true_dnames
+                )
+                n_domains = len(domain_names)
                 label = zero_based_to_ted_label(true_chopping)
                 nres_floor = max_required_length(true_chopping)
             except ValueError as exc:
                 excluded.append({"chain_id": chain_id, "reason": "invalid_chopping:{}".format(exc)})
                 continue
+
+            if reported_n_domains != n_domains:
+                truth_audit["reported_domain_count_mismatch"] += 1
+            if legacy_true_chopping != true_chopping:
+                truth_audit["legacy_chopping_differs"] += 1
 
             try:
                 pdb_path, status = download_pdb(
@@ -287,6 +348,11 @@ def prepare(args):
                     "n_domains": n_domains,
                     "domain_group": domain_group,
                     "chainsaw_true_chopping_zero_based": true_chopping,
+                    "chainsaw_legacy_true_chopping_zero_based": legacy_true_chopping,
+                    "chainsaw_true_dbounds_zero_based": true_dbounds,
+                    "chainsaw_true_dnames": true_dnames,
+                    "chainsaw_reported_n_domains": reported_n_domains,
+                    "chainsaw_truth_source": "true_dbounds_grouped_by_true_dnames",
                     "chainsaw_pred_chopping_zero_based": row.get("pred_chopping") or "",
                     "chainsaw_iou": row.get("iou") or "",
                     "chainsaw_correct_prop": row.get("proportion_correct_domains") or "",
@@ -307,6 +373,11 @@ def prepare(args):
         "n_domains",
         "domain_group",
         "chainsaw_true_chopping_zero_based",
+        "chainsaw_legacy_true_chopping_zero_based",
+        "chainsaw_true_dbounds_zero_based",
+        "chainsaw_true_dnames",
+        "chainsaw_reported_n_domains",
+        "chainsaw_truth_source",
         "chainsaw_pred_chopping_zero_based",
         "chainsaw_iou",
         "chainsaw_correct_prop",
@@ -334,8 +405,10 @@ def prepare(args):
         "rows_included": len(included),
         "rows_excluded": len(excluded),
         "domain_group_counts": dict(domain_groups),
+        "truth_audit": dict(truth_audit),
         "pdb_downloads": dict(pdb_downloads),
         "indexing_note": "CHAINSAW ranges are zero-based inclusive; TEDPred labels are one-based inclusive.",
+        "truth_note": "Ground truth is reconstructed from true_dbounds grouped by repeated true_dnames; true_chopping is retained only for audit.",
         "classification_note": "CATH labels are '-' because this CHAINSAW benchmark evaluates domain boundaries.",
     }
 

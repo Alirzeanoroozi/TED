@@ -74,8 +74,22 @@ TEDPred uses one-based inclusive `chopping_star` labels:
 1-260 | - * 261-443 | -
 ```
 
-The CATH class is `-` because this benchmark is for domain boundary comparison,
-not CATH classification.
+The CATH class is initially `-`; `add_cath_labels.py` creates a separate enriched
+copy for classification evaluation.
+
+### Authoritative domain grouping
+
+Do not use raw `true_chopping` as the benchmark target.  The authoritative target
+is reconstructed from `true_dbounds` and `true_dnames`: repeated domain names
+identify discontinuous segments belonging to one domain.  The preparation
+summary records how often the legacy chopping and reported domain count disagree
+with this reconstruction.
+
+New benchmark results also use ground-truth-residue-weighted matched chain IoU,
+normalize correct domains by the number of ground-truth domains, preserve empty
+model outputs as failures, and exclude missing CATH labels from CATH accuracy.
+Old result folders in this repository predate this corrected contract and should
+be regenerated before comparison.
 
 ## Why Extract Sequence From PDB Files?
 

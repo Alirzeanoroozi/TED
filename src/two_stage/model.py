@@ -3,11 +3,14 @@ head + Stage B hierarchical CATH classifier.
 
 Stage A (segmentation)
     A small trainable Transformer trunk on top of frozen ESM2 embeddings, with
-    three heads:
+    coupled heads:
       * residue head      -> P(residue belongs to a domain vs linker/NDR)
       * pairwise head     -> P(residue i, j in the same domain)  [symmetric]
-      * deletion head     -> SCISOR-style P(next residue to delete), supervised
-                             by known non-domain residues in v1
+      * deletion head     -> P(next non-domain residue to delete), trained on
+                             full and physically shortened empirical states
+      * budget head       -> remaining non-domain fraction
+    Deletion evidence and local evidence jumps can be projected back into the
+    residue and pairwise heads through a learned zero-initialized gate.
     At inference the pairwise matrix is clustered into domains (clustering.py),
     so the domain count is emergent rather than generated.
 
@@ -61,16 +64,45 @@ class SegmentationHead(nn.Module):
         self.k_proj = nn.Linear(d_model, pair_dim)
         self.pair_bias = nn.Parameter(torch.zeros(1))
         self.pair_scale = 1.0 / math.sqrt(pair_dim)
+        self.deletion_feature_proj = nn.Sequential(
+            nn.Linear(2, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
+        # A zero gate makes old checkpoints/ablations start at the exact base
+        # segmentation function while still allowing the model to learn how
+        # much deletion evidence should enter Stage A.
+        self.deletion_feature_gate = nn.Parameter(torch.zeros(()))
         self.d_model = d_model
 
     def forward(
-        self, emb: torch.Tensor, mask: torch.Tensor
+        self,
+        emb: torch.Tensor,
+        mask: torch.Tensor,
+        deletion_features: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """emb (B,L,esm_dim), mask (B,L) bool True=real.
 
         Returns residue_logit (B,L), pair_logit (B,L,L), trunk_rep (B,L,d_model).
         """
         h = self.encode(emb, mask)
+        return self.predict(h, deletion_features=deletion_features)
+
+    def predict(
+        self,
+        h: torch.Tensor,
+        deletion_features: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply residue/pair heads, optionally conditioned on deletion cues."""
+        if deletion_features is not None:
+            if deletion_features.shape[:2] != h.shape[:2] or deletion_features.shape[-1] != 2:
+                raise ValueError(
+                    "deletion_features must have shape (B, L, 2), got "
+                    f"{tuple(deletion_features.shape)} for trunk {tuple(h.shape)}"
+                )
+            h = h + self.deletion_feature_gate * self.deletion_feature_proj(
+                deletion_features.to(dtype=h.dtype)
+            )
         residue_logit = self.residue_head(h).squeeze(-1)
 
         q = self.q_proj(h)
@@ -87,10 +119,10 @@ class SegmentationHead(nn.Module):
 class DeletionDiffusionHead(nn.Module):
     """Position distribution for deleting non-domain residues.
 
-    This is the v1 supervised version of the SCISOR-inspired deletion denoiser:
-    it predicts a per-residue deletion logit distribution conditioned on the
-    current deletion budget ``S``.  No iterative shrinking/sampling is performed
-    here yet; training uses known TED non-domain residues as the delete target.
+    The SCISOR-inspired denoiser predicts a per-residue deletion distribution
+    conditioned on the current deletion budget ``S``.  TED supervision supplies
+    both the full-protein deletion set and physically shortened intermediate
+    states sampled along the non-domain-residue deletion path.
     """
 
     def __init__(
@@ -164,6 +196,25 @@ class DeletionDiffusionHead(nn.Module):
         cond = self.budget_embed(budget_features).unsqueeze(1)
         h = self.norm(trunk_rep + cond)
         return self.head(h).squeeze(-1)
+
+
+class DeletionBudgetHead(nn.Module):
+    """Predict the fraction of the current sequence that remains deletable."""
+
+    def __init__(self, d_model: int, hidden: int = 128, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, trunk_rep: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        weights = mask.to(dtype=trunk_rep.dtype).unsqueeze(-1)
+        pooled = (trunk_rep * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+        return torch.sigmoid(self.net(pooled).squeeze(-1))
 
 
 # --------------------------------------------------------------------------- #
@@ -291,9 +342,18 @@ class TwoStageDomainModel(nn.Module):
         esm_chunk_overlap: int = 256,
         esm_dtype: str = "bf16",
         deletion_head_input: str = "trunk",
+        deletion_feature_integration: bool = False,
+        deletion_budget_source: str = "supervised",
     ):
         super().__init__()
+        if deletion_budget_source not in {"supervised", "predicted"}:
+            raise ValueError(
+                "deletion_budget_source must be 'supervised' or 'predicted', got "
+                f"{deletion_budget_source!r}"
+            )
         self.cath_vocab = cath_vocab
+        self.deletion_feature_integration = bool(deletion_feature_integration)
+        self.deletion_budget_source = deletion_budget_source
         self.backbone = ESM2Backbone(
             model_name=esm_model_name,
             chunk_size=esm_chunk_size,
@@ -312,6 +372,7 @@ class TwoStageDomainModel(nn.Module):
             input_mode=deletion_head_input,
             dropout=dropout,
         )
+        self.deletion_budget_head = DeletionBudgetHead(d_model=d_model, dropout=dropout)
         # CATH feature = pooled ESM embedding (PLM semantics) ++ pooled trunk rep.
         self.cath_feat_dim = esm_dim + d_model
         self.cath_head = CathClassifier(
@@ -321,12 +382,18 @@ class TwoStageDomainModel(nn.Module):
         self._init_trainable_weights()
 
     def _init_trainable_weights(self):
-        for module in (self.seg_head, self.deletion_head, self.cath_head):
+        for module in (
+            self.seg_head,
+            self.deletion_head,
+            self.deletion_budget_head,
+            self.cath_head,
+        ):
             for p in module.parameters():
                 if p.dim() > 1:
                     nn.init.xavier_uniform_(p)
         nn.init.zeros_(self.deletion_head.budget_embed[-1].weight)
         nn.init.zeros_(self.deletion_head.budget_embed[-1].bias)
+        nn.init.zeros_(self.seg_head.deletion_feature_gate)
 
     # ---- helpers -------------------------------------------------------- #
     def prepare_backbone(self, device):
@@ -391,12 +458,26 @@ class TwoStageDomainModel(nn.Module):
         ``domains`` are GROUND-TRUTH domains (teacher-forced segmentation) so the
         CATH head learns classification decoupled from segmentation errors.
         """
-        residue_logit, pair_logit, trunk_rep = self.seg_head(emb, mask)
+        trunk_rep = self.seg_head.encode(emb, mask)
+        deletion_budget_fraction = self.deletion_budget_head(trunk_rep, mask)
+        predicted_budget = deletion_budget_fraction * mask.sum(dim=1).to(emb.dtype)
+        if self.deletion_budget_source == "predicted":
+            conditioned_budget = predicted_budget
+        else:
+            conditioned_budget = deletion_budget
         deletion_logit = self.deletion_logits_from_representations(
-            emb, trunk_rep, mask, deletion_budget
+            emb, trunk_rep, mask, conditioned_budget
+        )
+        deletion_features = None
+        if self.deletion_feature_integration:
+            deletion_features = diffusion.deletion_segmentation_features(
+                deletion_logit, mask
+            )
+        residue_logit, pair_logit, segmentation_rep = self.seg_head.predict(
+            trunk_rep, deletion_features=deletion_features
         )
         if domains:
-            feat = self._domain_features(emb, trunk_rep, domains)
+            feat = self._domain_features(emb, segmentation_rep, domains)
             cath_logits, _ = self.cath_head(feat, parent_ids=parent_ids)
         else:
             cath_logits = None
@@ -404,7 +485,10 @@ class TwoStageDomainModel(nn.Module):
             "residue_logit": residue_logit,
             "pair_logit": pair_logit,
             "deletion_logit": deletion_logit,
+            "deletion_budget_fraction": deletion_budget_fraction,
+            "deletion_budget": predicted_budget,
             "trunk_rep": trunk_rep,
+            "segmentation_rep": segmentation_rep,
             "cath_logits": cath_logits,
         }
 
@@ -427,18 +511,34 @@ class TwoStageDomainModel(nn.Module):
         then be applied to the cached features in several ways cheaply.
         """
         emb, mask = self.embed(sequences)
-        residue_logit, pair_logit, trunk_rep = self.seg_head(emb, mask)
-        res_prob_base = torch.sigmoid(residue_logit)
+        trunk_rep = self.seg_head.encode(emb, mask)
+        base_residue_logit, base_pair_logit, _ = self.seg_head.predict(trunk_rep)
+        res_prob_base = torch.sigmoid(base_residue_logit)
+        residue_logit = base_residue_logit
+        pair_logit = base_pair_logit
+        segmentation_rep = trunk_rep
         deletion_logit = None
         deletion_evidence = None
+        deletion_budget_fraction = self.deletion_budget_head(trunk_rep, mask)
         res_prob = res_prob_base
 
-        if deletion_fusion_alpha > 0 or return_aux:
-            deletion_budget = ((1.0 - res_prob_base) * mask.float()).sum(dim=1)
+        if self.deletion_feature_integration or deletion_fusion_alpha > 0 or return_aux:
+            if self.deletion_budget_source == "predicted":
+                deletion_budget = deletion_budget_fraction * mask.sum(dim=1).to(emb.dtype)
+            else:
+                deletion_budget = ((1.0 - res_prob_base) * mask.float()).sum(dim=1)
             deletion_logit = self.deletion_logits_from_representations(
                 emb, trunk_rep, mask, deletion_budget
             )
             deletion_evidence = diffusion.centered_deletion_evidence(deletion_logit, mask)
+            if self.deletion_feature_integration:
+                deletion_features = diffusion.deletion_segmentation_features(
+                    deletion_logit, mask
+                )
+                residue_logit, pair_logit, segmentation_rep = self.seg_head.predict(
+                    trunk_rep, deletion_features=deletion_features
+                )
+                res_prob = torch.sigmoid(residue_logit)
             if deletion_fusion_alpha > 0:
                 fused_residue_logit = residue_logit - deletion_fusion_alpha * deletion_evidence
                 res_prob = torch.sigmoid(fused_residue_logit)
@@ -463,7 +563,7 @@ class TwoStageDomainModel(nn.Module):
                     full = torch.zeros(emb.shape[1], dtype=torch.bool, device=emb.device)
                     full[:L] = torch.from_numpy(assign == k).to(emb.device)
                     masks.append((b, full))
-                feat = self._domain_features(emb, trunk_rep, masks)
+                feat = self._domain_features(emb, segmentation_rep, masks)
             if return_aux:
                 aux = {
                     "assign": assign,
@@ -480,6 +580,10 @@ class TwoStageDomainModel(nn.Module):
                         if deletion_logit is not None
                         else np.zeros(L, dtype=np.float32)
                     ),
+                    "deletion_budget_fraction": float(
+                        deletion_budget_fraction[b].detach().cpu()
+                    ),
+                    "deletion_budget": float(deletion_budget[b].detach().cpu()),
                 }
                 per_sample.append(aux)
             else:
@@ -619,12 +723,20 @@ class TwoStageDomainModel(nn.Module):
         trace = []
         for step in range(num_deletions):
             emb, mask = self.embed([current])
-            residue_logit, _, trunk_rep = self.seg_head(emb, mask)
-            res_prob = torch.sigmoid(residue_logit)
+            trunk_rep = self.seg_head.encode(emb, mask)
             budget = torch.tensor([num_deletions - step], dtype=emb.dtype, device=emb.device)
             deletion_logit = self.deletion_logits_from_representations(
                 emb, trunk_rep, mask, budget
             )
+            deletion_features = None
+            if self.deletion_feature_integration:
+                deletion_features = diffusion.deletion_segmentation_features(
+                    deletion_logit, mask
+                )
+            residue_logit, _, _ = self.seg_head.predict(
+                trunk_rep, deletion_features=deletion_features
+            )
+            res_prob = torch.sigmoid(residue_logit)
             valid = mask[0, : len(current)]
             scores = deletion_logit[0, : len(current)].masked_fill(~valid, -torch.inf)
             if temperature and temperature > 0:

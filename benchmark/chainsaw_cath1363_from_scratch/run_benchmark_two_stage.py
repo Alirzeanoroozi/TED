@@ -16,6 +16,7 @@ Usage (repo root, 'ted' env):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -38,10 +39,61 @@ for p in (str(THIS_DIR), str(SRC_DIR), str(BENCHMARK_DIR), str(REPO_ROOT)):
 import run_benchmark as rb  # noqa: E402
 from two_stage.infer import (  # noqa: E402
     load_two_stage,
-    predict_chopping_star_batch,
     predict_chopping_star_with_aux_batch,
 )
 from two_stage.targets import parse_chopping_star, residue_assignment  # noqa: E402
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _benchmark_fingerprint(bench_df: pd.DataFrame) -> str:
+    digest = hashlib.sha256()
+    for _, row in bench_df.iterrows():
+        payload = "\0".join(
+            [
+                str(row.get("target_id", "")),
+                str(row.get("sequence", "")),
+                str(row.get("label", "")),
+                str(row.get("n_domains", "")),
+            ]
+        )
+        digest.update(payload.encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _cache_metadata(
+    bench_df: pd.DataFrame,
+    checkpoint: Path,
+    *,
+    batch_size: int,
+    min_domain_len: int,
+    cluster_method: str,
+    cath_decode: str,
+    cath_beam_width: int,
+    deletion_fusion_alpha: float,
+    max_len: int,
+) -> dict:
+    return {
+        "cache_schema": 1,
+        "checkpoint": str(checkpoint.resolve()),
+        "checkpoint_sha256": _sha256_file(checkpoint),
+        "benchmark_fingerprint": _benchmark_fingerprint(bench_df),
+        "n_targets": int(len(bench_df)),
+        "batch_size": int(batch_size),
+        "min_domain_len": int(min_domain_len),
+        "cluster_method": str(cluster_method),
+        "cath_decode": str(cath_decode),
+        "cath_beam_width": int(cath_beam_width),
+        "deletion_fusion_alpha": float(deletion_fusion_alpha),
+        "max_len": int(max_len),
+    }
 
 
 def run_inference(
@@ -56,14 +108,21 @@ def run_inference(
     deletion_fusion_alpha: float,
     max_len: int,
     cache_path: Path | None,
+    cache_metadata: dict | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     aux_path = cache_path.with_name(cache_path.stem + "_aux.parquet") if cache_path else None
-    if cache_path and cache_path.exists():
+    meta_path = cache_path.with_suffix(cache_path.suffix + ".meta.json") if cache_path else None
+    if cache_path and cache_path.exists() and meta_path and meta_path.exists():
+        recorded_metadata = json.loads(meta_path.read_text())
         cached = pd.read_csv(cache_path)
-        if set(cached["target_id"].astype(str)).issuperset(set(bench_df["target_id"].astype(str))):
+        ids_match = cached["target_id"].astype(str).tolist() == bench_df["target_id"].astype(str).tolist()
+        metadata_match = cache_metadata is not None and recorded_metadata == cache_metadata
+        aux_complete = aux_path is not None and aux_path.exists()
+        if ids_match and metadata_match and aux_complete:
             print(f"All predictions cached at {cache_path}; skipping inference.")
-            aux_cached = pd.read_parquet(aux_path) if aux_path and aux_path.exists() else None
+            aux_cached = pd.read_parquet(aux_path)
             return cached, aux_cached
+        print(f"Ignoring stale or incomplete prediction cache at {cache_path}.")
 
     target_ids = bench_df["target_id"].astype(str).tolist()
     sequences = bench_df["sequence"].astype(str).tolist()
@@ -92,6 +151,8 @@ def run_inference(
             "deletion_logit": [row["deletion_logit"].astype(float).tolist() for row in aux],
             "residue_prob": [row["residue_prob"].astype(float).tolist() for row in aux],
             "base_residue_prob": [row["base_residue_prob"].astype(float).tolist() for row in aux],
+            "deletion_budget_fraction": [float(row["deletion_budget_fraction"]) for row in aux],
+            "deletion_budget": [float(row["deletion_budget"]) for row in aux],
         }
     )
     if cache_path:
@@ -100,6 +161,9 @@ def run_inference(
         print(f"Saved predictions -> {cache_path}")
         aux_df.to_parquet(aux_path, index=False)
         print(f"Saved deletion aux scores -> {aux_path}")
+        if meta_path is not None and cache_metadata is not None:
+            meta_path.write_text(json.dumps(cache_metadata, indent=2, sort_keys=True) + "\n")
+            print(f"Saved prediction provenance -> {meta_path}")
     return pred_df, aux_df
 
 
@@ -224,10 +288,20 @@ def add_deletion_metrics(
             enrichment = precision_top / bg
         else:
             enrichment = float("nan")
+        effective_budget = aux.get("deletion_budget", float("nan"))
+        budget_fraction = aux.get("deletion_budget_fraction", float("nan"))
         pred_budget = (
-            float(np.sum(1.0 - base_residue_prob[:n]))
-            if len(base_residue_prob) >= n
-            else float("nan")
+            float(effective_budget)
+            if np.isfinite(float(effective_budget))
+            else (
+                float(budget_fraction) * n
+                if np.isfinite(float(budget_fraction))
+                else (
+                    float(np.sum(1.0 - base_residue_prob[:n]))
+                    if len(base_residue_prob) >= n
+                    else float("nan")
+                )
+            )
         )
         rows.append(
             {
@@ -387,6 +461,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-len", type=int, default=1700,
                    help="Truncate chains longer than this at inference (memory cap for the LxL head).")
     p.add_argument("--skip-inference", action="store_true")
+    p.add_argument("--allow-legacy-benchmark", action="store_true",
+                   help="Audit-only escape hatch for CSVs created with the former truth target.")
     p.add_argument("--ablation", action="store_true",
                    help="Compare CATH decode modes (greedy vs beam) sharing one segmentation pass.")
     return p.parse_args()
@@ -480,6 +556,9 @@ def main() -> None:
 
     print(f"\nLoading benchmark CSV: {args.benchmark_csv}")
     bench_df = pd.read_csv(args.benchmark_csv)
+    rb.validate_benchmark_contract(
+        bench_df, allow_legacy=args.allow_legacy_benchmark
+    )
     print(f"  {len(bench_df)} chains")
 
     # ---- ABLATION: auxiliary-only vs deletion-fused segmentation ---- #
@@ -500,6 +579,17 @@ def main() -> None:
                 deletion_fusion_alpha=alpha,
                 max_len=args.max_len,
                 cache_path=out_dir / f"predictions_{label}.csv",
+                cache_metadata=_cache_metadata(
+                    bench_df,
+                    args.checkpoint,
+                    batch_size=args.batch_size,
+                    min_domain_len=args.min_domain_len,
+                    cluster_method=args.cluster_method,
+                    cath_decode=args.cath_decode,
+                    cath_beam_width=args.cath_beam_width,
+                    deletion_fusion_alpha=alpha,
+                    max_len=args.max_len,
+                ),
             )
             metrics_df = summarize_and_save(
                 bench_df,
@@ -560,6 +650,17 @@ def main() -> None:
             deletion_fusion_alpha=args.deletion_fusion_alpha,
             max_len=args.max_len,
             cache_path=predictions_path,
+            cache_metadata=_cache_metadata(
+                bench_df,
+                args.checkpoint,
+                batch_size=args.batch_size,
+                min_domain_len=args.min_domain_len,
+                cluster_method=args.cluster_method,
+                cath_decode=args.cath_decode,
+                cath_beam_width=args.cath_beam_width,
+                deletion_fusion_alpha=args.deletion_fusion_alpha,
+                max_len=args.max_len,
+            ),
         )
 
     print("\nEvaluating predictions...")

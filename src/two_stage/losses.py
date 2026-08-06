@@ -134,6 +134,17 @@ def deletion_ce_loss(
     return deletion_mask_ce_loss(deletion_logit, assign == 0, mask)
 
 
+def deletion_budget_loss(
+    predicted_fraction: torch.Tensor,
+    assign: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Smooth-L1 loss for the per-chain remaining non-domain fraction."""
+    lengths = mask.sum(dim=1).clamp_min(1).to(dtype=predicted_fraction.dtype)
+    target = (((assign == 0) & mask).sum(dim=1).to(predicted_fraction.dtype) / lengths)
+    return F.smooth_l1_loss(predicted_fraction, target, reduction="mean")
+
+
 def cath_loss(
     cath_logits: List[torch.Tensor],          # 4 x (N, V_level)
     targets: torch.Tensor,                     # (N, 4) int level ids

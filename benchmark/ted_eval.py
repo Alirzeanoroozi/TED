@@ -21,10 +21,11 @@ import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import linear_sum_assignment
 
 if __package__:
     from .domain_boundry_dist import (
@@ -204,7 +205,16 @@ def parse_annotation(annotation: Any, *, input_indexing: str = "one_based_inclus
 _MAX_RESIDUE_SPAN = 10_000  # guard: no real protein has a segment longer than this
 
 
-def _domain_residue_sets(parsed: ParsedAnnotation) -> List[set[int]]:
+def _domain_residue_sets(
+    parsed: ParsedAnnotation, *, nres: Optional[int] = None
+) -> List[set[int]]:
+    """Convert domains to residue sets, clipping every metric to the chain.
+
+    Historically the overlap metric used unbounded parsed ranges while NDO and
+    boundary metrics used ranges clipped to ``nres``.  That allowed malformed or
+    truncated predictions to be scored against different residue universes.
+    """
+
     residue_sets: List[set[int]] = []
     for domain in parsed.domains:
         residues: set[int] = set()
@@ -213,7 +223,11 @@ def _domain_residue_sets(parsed: ParsedAnnotation) -> List[set[int]]:
             # Allocating range(0, 9_999_999) causes MemoryError with 100-sample evals.
             if end - start > _MAX_RESIDUE_SPAN:
                 end = start + _MAX_RESIDUE_SPAN
-            residues.update(range(start, end))
+            if nres is not None:
+                start = max(0, min(start, nres))
+                end = max(0, min(end, nres))
+            if end > start:
+                residues.update(range(start, end))
         residue_sets.append(residues)
     return residue_sets
 
@@ -297,94 +311,16 @@ def _pairwise_iou(a: set[int], b: set[int]) -> float:
     return len(a.intersection(b)) / len(union)
 
 
-def _greedy_assignment(iou_matrix: np.ndarray) -> Tuple[float, List[Tuple[int, int]]]:
-    pairs: List[Tuple[int, int]] = []
-    used_row: set[int] = set()
-    used_col: set[int] = set()
-
-    ranked: List[Tuple[float, int, int]] = []
-    for i in range(iou_matrix.shape[0]):
-        for j in range(iou_matrix.shape[1]):
-            ranked.append((float(iou_matrix[i, j]), i, j))
-    ranked.sort(key=lambda x: x[0], reverse=True)
-
-    total = 0.0
-    for score, i, j in ranked:
-        if i in used_row or j in used_col:
-            continue
-        used_row.add(i)
-        used_col.add(j)
-        pairs.append((i, j))
-        total += score
-    return total, pairs
-
-
 def _optimal_assignment(iou_matrix: np.ndarray) -> Tuple[float, List[Tuple[int, int]]]:
     """Maximize sum of pairwise IoU under one-to-one matching."""
 
     n_pred, n_gt = iou_matrix.shape
     if n_pred == 0 or n_gt == 0:
         return 0.0, []
-
-    if max(n_pred, n_gt) > 12:
-        return _greedy_assignment(iou_matrix)
-
-    # Use an explicit memo dict instead of @lru_cache on a local function.
-    # @lru_cache on a locally-defined recursive closure creates a reference
-    # cycle (wrapper -> __wrapped__ -> closure -> wrapper) that the refcount
-    # GC cannot immediately collect.  With 200 evaluate_target calls per
-    # benchmark eval, the cache residue accumulates to hundreds of MB before
-    # gc.collect() runs.  A plain dict is freed the moment this function returns.
-    memo: dict = {}
-
-    if n_pred <= n_gt:
-        def solve(i: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:
-            key = (i, used_mask)
-            if key in memo:
-                return memo[key]
-            if i == n_pred:
-                result: Tuple[float, Tuple[Tuple[int, int], ...]] = (0.0, tuple())
-            else:
-                best_score = -1.0
-                best_pairs: Tuple[Tuple[int, int], ...] = tuple()
-                for j in range(n_gt):
-                    if used_mask & (1 << j):
-                        continue
-                    sub_score, sub_pairs = solve(i + 1, used_mask | (1 << j))
-                    cand_score = float(iou_matrix[i, j]) + sub_score
-                    if cand_score > best_score:
-                        best_score = cand_score
-                        best_pairs = ((i, j),) + sub_pairs
-                result = (best_score, best_pairs)
-            memo[key] = result
-            return result
-
-        score, pairs = solve(0, 0)
-        return float(score), list(pairs)
-
-    def solve(j: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:  # type: ignore[misc]
-        key = (j, used_mask)
-        if key in memo:
-            return memo[key]
-        if j == n_gt:
-            result = (0.0, tuple())
-        else:
-            best_score = -1.0
-            best_pairs: Tuple[Tuple[int, int], ...] = tuple()
-            for i in range(n_pred):
-                if used_mask & (1 << i):
-                    continue
-                sub_score, sub_pairs = solve(j + 1, used_mask | (1 << i))
-                cand_score = float(iou_matrix[i, j]) + sub_score
-                if cand_score > best_score:
-                    best_score = cand_score
-                    best_pairs = ((i, j),) + sub_pairs
-            result = (best_score, best_pairs)
-        memo[key] = result
-        return result
-
-    score, pairs = solve(0, 0)
-    return float(score), list(pairs)
+    row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+    pairs = [(int(i), int(j)) for i, j in zip(row_ind, col_ind)]
+    score = sum(float(iou_matrix[i, j]) for i, j in pairs)
+    return score, pairs
 
 
 def _cath_level_score(pred_label: Optional[str], gt_label: Optional[str]) -> float:
@@ -419,11 +355,20 @@ def chain_overlap_metrics(
     pred_parsed: ParsedAnnotation,
     *,
     iou_threshold: float,
+    nres: Optional[int] = None,
 ) -> Dict[str, float]:
-    """Compute chain-level IoU and correctly-parsed proportion."""
+    """Compute official CHAINSAW overlap and explicit auxiliary metrics.
 
-    gt_sets = _domain_residue_sets(gt_parsed)
-    pred_sets = _domain_residue_sets(pred_parsed)
+    ``iou_chain`` is the CHAINSAW metric: optimally matched domain IoUs weighted
+    by the corresponding ground-truth domain sizes.  The former repository
+    metric is retained as ``iou_chain_unweighted`` for historical comparisons.
+    Correct-domain proportion is normalized by the number of ground-truth
+    domains, as in CHAINSAW, so over-prediction is handled by IoU/domain-count
+    metrics rather than changing the denominator.
+    """
+
+    gt_sets = _domain_residue_sets(gt_parsed, nres=nres)
+    pred_sets = _domain_residue_sets(pred_parsed, nres=nres)
 
     n_gt = len(gt_sets)
     n_pred = len(pred_sets)
@@ -432,17 +377,26 @@ def chain_overlap_metrics(
     if denom == 0:
         return {
             "iou_chain": 1.0,
+            "iou_chain_unweighted": 1.0,
             "correct_prop": 1.0,
-            "correct_cath_prop": 1.0,
-            "cath_level_score": 1.0,
+            "correct_prop_unweighted": 1.0,
+            "correct_cath_prop": math.nan,
+            "cath_level_score": math.nan,
+            "joint_iou_cath_labeled": math.nan,
+            "n_labeled_gt_domains": 0.0,
         }
 
     if n_gt == 0 or n_pred == 0:
+        n_labeled = sum(d.class_label is not None for d in gt_parsed.domains)
         return {
             "iou_chain": 0.0,
+            "iou_chain_unweighted": 0.0,
             "correct_prop": 0.0,
-            "correct_cath_prop": 0.0,
-            "cath_level_score": 0.0,
+            "correct_prop_unweighted": 0.0,
+            "correct_cath_prop": 0.0 if n_labeled else math.nan,
+            "cath_level_score": 0.0 if n_labeled else math.nan,
+            "joint_iou_cath_labeled": 0.0 if n_labeled else math.nan,
+            "n_labeled_gt_domains": float(n_labeled),
         }
 
     iou_matrix = np.zeros((n_pred, n_gt), dtype=float)
@@ -453,8 +407,10 @@ def chain_overlap_metrics(
     total_iou, pairs = _optimal_assignment(iou_matrix)
 
     correct = 0
-    correct_cath = 0
-    cath_level_scores: List[float] = []
+    correct_cath_labeled = 0
+    joint_iou_cath_labeled = 0
+    cath_level_score_sum = 0.0
+    n_labeled_gt = sum(d.class_label is not None for d in gt_parsed.domains)
     for i, j in pairs:
         iou_val = float(iou_matrix[i, j])
         if iou_val >= iou_threshold:
@@ -462,21 +418,40 @@ def chain_overlap_metrics(
 
         pred_label = pred_parsed.domains[i].class_label
         gt_label = gt_parsed.domains[j].class_label
-        if pred_label == gt_label:
-            correct_cath += 1
+        if gt_label is not None:
+            exact = pred_label is not None and pred_label == gt_label
+            correct_cath_labeled += int(exact)
+            joint_iou_cath_labeled += int(exact and iou_val >= iou_threshold)
+            cath_level_score_sum += _cath_level_score(pred_label, gt_label)
 
-        cath_level_scores.append(_cath_level_score(pred_label, gt_label))
+    gt_sizes = np.asarray([len(domain) for domain in gt_sets], dtype=float)
+    total_gt_residues = float(gt_sizes.sum())
+    if total_gt_residues > 0:
+        weighted_iou = sum(
+            float(iou_matrix[i, j]) * float(gt_sizes[j]) for i, j in pairs
+        ) / total_gt_residues
+    else:
+        weighted_iou = 0.0
 
-    # Unmatched domains score 0 for the CATH level metric — pad up to denom.
-    n_unmatched = denom - len(pairs)
-    cath_level_scores.extend([0.0] * n_unmatched)
-    mean_cath_level = float(np.mean(cath_level_scores)) if cath_level_scores else 0.0
+    cath_exact = (
+        correct_cath_labeled / n_labeled_gt if n_labeled_gt else math.nan
+    )
+    cath_level = (
+        cath_level_score_sum / n_labeled_gt if n_labeled_gt else math.nan
+    )
+    joint_cath = (
+        joint_iou_cath_labeled / n_labeled_gt if n_labeled_gt else math.nan
+    )
 
     return {
-        "iou_chain": total_iou / denom,
-        "correct_prop": correct / denom,
-        "correct_cath_prop": correct_cath / denom,
-        "cath_level_score": mean_cath_level,
+        "iou_chain": weighted_iou,
+        "iou_chain_unweighted": total_iou / denom,
+        "correct_prop": correct / n_gt,
+        "correct_prop_unweighted": correct / denom,
+        "correct_cath_prop": cath_exact,
+        "cath_level_score": cath_level,
+        "joint_iou_cath_labeled": joint_cath,
+        "n_labeled_gt_domains": float(n_labeled_gt),
     }
 
 
@@ -574,7 +549,12 @@ def evaluate_target(
 
     out["domain_count_match"] = int(out["gt_domain_count"] == out["pred_domain_count"])
 
-    overlap = chain_overlap_metrics(gt_parsed, pred_parsed, iou_threshold=cfg.iou_threshold)
+    overlap = chain_overlap_metrics(
+        gt_parsed,
+        pred_parsed,
+        iou_threshold=cfg.iou_threshold,
+        nres=inferred_nres,
+    )
     out.update(overlap)
 
     # Backward-compatible alias used in existing CSVs.
@@ -695,9 +675,12 @@ def summarize_metrics(metrics_df: pd.DataFrame) -> Tuple[Dict[str, Any], pd.Data
 
     metric_cols = [
         "iou_chain",
+        "iou_chain_unweighted",
         "correct_prop",
+        "correct_prop_unweighted",
         "correct_cath_prop",
         "cath_level_score",
+        "joint_iou_cath_labeled",
         "ndo",
         "boundary_distance_score",
     ]

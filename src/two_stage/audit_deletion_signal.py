@@ -345,17 +345,20 @@ def main() -> None:
     if residue_signal < 0.05 or chain_signal < 0.50:
         verdict = (
             "Real TED non-domain residues are sparse in the training view; "
-            "SCISOR-style artificial insertion noising should be included from v1."
+            "oversample the empirical full-protein state and compare artificial "
+            "insertion only as a separately labelled control."
         )
     elif residue_signal < 0.10:
         verdict = (
             "Real TED non-domain residues provide a usable but modest deletion signal; "
-            "mixing artificial insertion noising is still recommended."
+            "prioritize physically shortened empirical states and keep artificial "
+            "insertion as an ablation."
         )
     else:
         verdict = (
             "Real TED labels contain enough non-domain residue signal to train a "
-            "supervised deletion auxiliary head, with artificial noising as a robustness add-on."
+            "supervised empirical deletion path; artificial noising is optional and "
+            "must be evaluated separately."
         )
     summary["verdict"] = verdict
 

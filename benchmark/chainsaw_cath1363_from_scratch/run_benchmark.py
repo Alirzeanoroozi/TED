@@ -18,9 +18,9 @@ Produces:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
-import os
 import sys
 import time
 from pathlib import Path
@@ -32,7 +32,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from scipy import stats
 
 # ---------------------------------------------------------------------------
 # Path setup: allow running from repo root or from the benchmark subdirectory
@@ -49,6 +48,57 @@ from model import TextToTextTransformer
 from evaluate import grammar_guided_decode, greedy_decode
 from data.dataset_ import _load_paths
 from ted_eval import EvalConfig, evaluate_target
+
+
+EXPECTED_TRUTH_SOURCE = "true_dbounds_grouped_by_true_dnames"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def benchmark_fingerprint(df: pd.DataFrame) -> str:
+    digest = hashlib.sha256()
+    for _, row in df.iterrows():
+        digest.update(
+            "\0".join(
+                [
+                    str(row.get("target_id", "")),
+                    str(row.get("sequence", "")),
+                    str(row.get("label", "")),
+                    str(row.get("n_domains", "")),
+                ]
+            ).encode("utf-8")
+        )
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def validate_benchmark_contract(
+    df: pd.DataFrame, *, allow_legacy: bool = False
+) -> None:
+    """Refuse benchmark tables built with the known-bad legacy truth target."""
+    sources = (
+        set(df["chainsaw_truth_source"].dropna().astype(str).unique())
+        if "chainsaw_truth_source" in df.columns
+        else set()
+    )
+    valid = sources == {EXPECTED_TRUTH_SOURCE}
+    if valid:
+        return
+    message = (
+        "Benchmark CSV does not declare the corrected CHAINSAW truth contract "
+        f"({EXPECTED_TRUTH_SOURCE!r}); observed sources={sorted(sources)}. "
+        "Regenerate it with prepare_tedpred_benchmark.py and add_cath_labels.py."
+    )
+    if allow_legacy:
+        print(f"[warn] {message}")
+    else:
+        raise RuntimeError(message + " Use --allow-legacy-benchmark only for an explicit audit.")
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +202,25 @@ def run_inference(
     device: torch.device,
     grammar_guided: bool = True,
     cache_path: Path | None = None,
+    cache_metadata: dict | None = None,
 ) -> pd.DataFrame:
     """Run inference on all rows; optionally resume from a cached predictions file."""
-    if cache_path and cache_path.exists():
+    meta_path = cache_path.with_suffix(cache_path.suffix + ".meta.json") if cache_path else None
+    if cache_path and cache_path.exists() and meta_path and meta_path.exists():
         cached = pd.read_csv(cache_path)
-        done_ids = set(cached["target_id"].astype(str))
-        if done_ids.issuperset(set(df["target_id"].astype(str))):
+        recorded_metadata = json.loads(meta_path.read_text())
+        metadata_match = cache_metadata is not None and recorded_metadata == cache_metadata
+        cached_ids = cached["target_id"].astype(str).tolist()
+        target_ids = df["target_id"].astype(str).tolist()
+        done_ids = set(cached_ids) if metadata_match else set()
+        if metadata_match and cached_ids == target_ids:
             print(f"All {len(df)} predictions already cached at {cache_path}; skipping inference.")
             return cached
-        print(f"Resuming from cache: {len(done_ids)} / {len(df)} done.")
+        if metadata_match:
+            print(f"Resuming from matching cache: {len(done_ids)} / {len(df)} done.")
+        else:
+            print(f"Ignoring stale prediction cache at {cache_path} (provenance mismatch).")
+            cached = None
     else:
         cached = None
         done_ids = set()
@@ -197,6 +257,9 @@ def run_inference(
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         result.to_csv(cache_path, index=False)
         print(f"Saved predictions -> {cache_path}")
+        if meta_path is not None and cache_metadata is not None:
+            meta_path.write_text(json.dumps(cache_metadata, indent=2, sort_keys=True) + "\n")
+            print(f"Saved prediction provenance -> {meta_path}")
     return result
 
 
@@ -209,6 +272,18 @@ def evaluate_predictions(
     pred_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Merge predictions with benchmark labels and compute per-chain metrics."""
+    if pred_df["target_id"].astype(str).duplicated().any():
+        duplicates = pred_df.loc[
+            pred_df["target_id"].astype(str).duplicated(keep=False), "target_id"
+        ].astype(str)
+        raise ValueError(
+            "prediction table has duplicate target_id values: "
+            + ", ".join(sorted(duplicates.unique())[:10])
+        )
+    bench_df = bench_df.copy()
+    pred_df = pred_df.copy()
+    bench_df["target_id"] = bench_df["target_id"].astype(str)
+    pred_df["target_id"] = pred_df["target_id"].astype(str)
     merged = bench_df.merge(pred_df, on="target_id", how="left")
     cfg = EvalConfig(iou_threshold=0.8, input_indexing="one_based_inclusive")
 
@@ -219,14 +294,16 @@ def evaluate_predictions(
         nres = int(row["nres"]) if not pd.isna(row["nres"]) else None
         seq = str(row["sequence"])
 
-        if pd.isna(pred) or pred is None or str(pred).strip() == "":
-            pred = "1-%d | -" % nres if nres else None
+        prediction_missing = pred is None or pd.isna(pred)
+        prediction_empty = not prediction_missing and str(pred).strip() == ""
 
         m = evaluate_target(label, pred, nres=nres, sequence=seq, config=cfg)
         m["target_id"] = str(row["target_id"])
         m["domain_group"] = str(row["domain_group"])
         m["n_domains"] = int(row["n_domains"])
-        m["pred_chopping_star"] = str(pred)
+        m["prediction_missing"] = bool(prediction_missing)
+        m["prediction_empty"] = bool(prediction_empty)
+        m["pred_chopping_star"] = "" if prediction_missing else str(pred)
         m["label"] = str(label)
         records.append(m)
 
@@ -409,28 +486,26 @@ def make_cath_figure(
 
     Only meaningful when the benchmark CSV contains real CATH superfamily codes
     in the ground-truth labels (i.e. when run with the CATH-enriched CSV produced
-    by add_cath_labels.py).  When labels contain '-' placeholders the bars will
-    be 0 and a warning is printed instead of saving the figure.
+    by add_cath_labels.py).  With no known labels, a warning is printed instead.
     """
     np.random.seed(42)
 
-    # cath_level_score > 0 only when gt contains real CATH codes (not '-' placeholders).
-    # correct_cath alone is an unreliable indicator: it counts None==None as a match
-    # when both pred and gt happen to emit '-', even with the original un-enriched CSV.
+    # Count explicit known labels rather than using score > 0: a genuinely poor
+    # classifier may score zero even when the benchmark is correctly labelled.
     has_cath = (
-        "cath_level_score" in tedpred_metrics.columns
-        and float(tedpred_metrics["cath_level_score"].mean()) > 0
+        "n_labeled_gt_domains" in tedpred_metrics.columns
+        and int(tedpred_metrics["n_labeled_gt_domains"].sum()) > 0
     )
     if not has_cath:
         print(
-            "  Skipping CATH figure: cath_level_score is 0 — ground-truth labels "
-            "contain no real CATH superfamily codes.  Re-run with the CATH-enriched CSV "
+            "  Skipping CATH figure: ground truth has no known CATH labels. "
+            "Re-run with the CATH-enriched CSV "
             "(data/processed_with_cath/) to generate this figure."
         )
         return
 
     cath_metrics = [
-        ("correct_cath",     "CATH exact match\n(correct superfamily proportion)"),
+        ("correct_cath_prop", "CATH exact match\n(known-label domain proportion)"),
         ("cath_level_score", "CATH level score\n(hierarchical C.A.T.H match, 0–1)"),
     ]
     groups = [
@@ -495,8 +570,10 @@ def make_cath_figure(
 def build_summary(metrics_df: pd.DataFrame) -> dict:
     np.random.seed(42)
     metric_cols = [
-        "iou_chain", "correct_prop", "boundary_distance_score", "ndo",
-        "domain_count_match", "correct_cath", "cath_level_score",
+        "iou_chain", "iou_chain_unweighted", "correct_prop",
+        "correct_prop_unweighted", "boundary_distance_score", "ndo",
+        "domain_count_match", "correct_cath_prop", "cath_level_score",
+        "joint_iou_cath_labeled", "n_labeled_gt_domains",
     ]
     summary = {"n_total": len(metrics_df), "groups": {}}
 
@@ -544,6 +621,8 @@ def parse_args() -> argparse.Namespace:
                    help="Force device: 'cpu' or 'cuda'. Auto-detected by default.")
     p.add_argument("--skip-inference", action="store_true",
                    help="Skip inference and load from existing predictions.csv in output dir.")
+    p.add_argument("--allow-legacy-benchmark", action="store_true",
+                   help="Audit-only escape hatch for CSVs created with the former truth target.")
     return p.parse_args()
 
 
@@ -564,6 +643,9 @@ def main() -> None:
     # ----- load benchmark data -----
     print(f"\nLoading benchmark CSV: {args.benchmark_csv}")
     bench_df = pd.read_csv(args.benchmark_csv)
+    validate_benchmark_contract(
+        bench_df, allow_legacy=args.allow_legacy_benchmark
+    )
     print(f"  {len(bench_df)} chains  "
           f"(single: {(bench_df['domain_group']=='single').sum()}, "
           f"multi: {(bench_df['domain_group']=='multi').sum()})")
@@ -591,11 +673,25 @@ def main() -> None:
 
         # ----- inference -----
         print(f"\nRunning inference on {len(bench_df)} sequences...")
+        tokenizer_files = sorted(args.data_parquet_dir.glob("*.parquet"))[:3]
+        cache_metadata = {
+            "cache_schema": 1,
+            "checkpoint": str(args.checkpoint.resolve()),
+            "checkpoint_sha256": sha256_file(args.checkpoint),
+            "benchmark_fingerprint": benchmark_fingerprint(bench_df),
+            "tokenizer_parquet_sha256": {
+                str(path.resolve()): sha256_file(path) for path in tokenizer_files
+            },
+            "max_src_len": int(max_src_len),
+            "max_tgt_len": int(max_tgt_len),
+            "grammar_guided": bool(grammar_guided),
+        }
         pred_df = run_inference(
             bench_df, model, src_tok, tgt_tok,
             max_src_len, max_tgt_len, device,
             grammar_guided=grammar_guided,
             cache_path=predictions_path,
+            cache_metadata=cache_metadata,
         )
 
     # ----- evaluation -----
@@ -630,8 +726,8 @@ def main() -> None:
 
     # ----- print table -----
     has_cath = (
-        "cath_level_score" in metrics_df.columns
-        and float(metrics_df["cath_level_score"].mean()) > 0
+        "n_labeled_gt_domains" in metrics_df.columns
+        and int(metrics_df["n_labeled_gt_domains"].sum()) > 0
     )
     cath_note = "" if has_cath else "  (CATH cols not meaningful — ground truth has no real CATH labels; use CATH-enriched CSV)"
 
@@ -652,7 +748,7 @@ def main() -> None:
         corr   = float(sub["correct_prop"].mean()) if "correct_prop" in sub else math.nan
         dbd    = float(sub["boundary_distance_score"].mean()) if "boundary_distance_score" in sub else math.nan
         ndo    = float(sub["ndo"].mean()) if "ndo" in sub else math.nan
-        ccath  = float(sub["correct_cath"].mean()) if "correct_cath" in sub.columns else math.nan
+        ccath  = float(sub["correct_cath_prop"].mean()) if "correct_cath_prop" in sub.columns else math.nan
         clvl   = float(sub["cath_level_score"].mean()) if "cath_level_score" in sub.columns else math.nan
         print(f"  TED-Pred {gname:<12} {len(sub):>5}  {iou:>6.3f}  {corr:>8.3f}  "
               f"{dbd:>6.3f}  {ndo:>6.3f}  {ccath:>10.3f}  {clvl:>8.3f}")

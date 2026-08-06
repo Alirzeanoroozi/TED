@@ -9,11 +9,13 @@ tokenizers>=0.13.0
 numpy>=1.24.0
 torch>=2.0.0
 pandas>=1.5.0
+scipy>=1.9.0
 pytorch-lightning>=2.0.0
 wandb>=0.15.0
 pydantic>=2.7.4
 python-dotenv>=1.0.0
 biopython>=1.80
+pytest>=7.0.0
 
 # two-stage model: frozen ESM2 protein-LM backbone
 fair-esm>=2.0.0

@@ -41,6 +41,12 @@ import wandb
 from data.dataset_ import _load_paths
 from two_stage.cath_vocab import CathVocab
 from two_stage.dataset import TwoStageDataset, collate_fn, LengthBucketedSampler
+from two_stage.experiment import (
+    build_split_manifest,
+    load_and_validate_split_manifest,
+    save_split_manifest,
+    split_dataframe,
+)
 from two_stage.model import TwoStageDomainModel
 from two_stage import diffusion, losses
 
@@ -98,6 +104,9 @@ class TwoStageDataModule(pl.LightningDataModule):
         benchmark_eval_subset_size: int = 100,
         benchmark_eval_seed: int = 42,
         vocab_save_path: str | None = None,
+        cath_vocab_path: str | None = None,
+        split_manifest_path: str | None = None,
+        split_group_col: str = "auto",
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         shuffle_seed: int = 42,
@@ -111,6 +120,9 @@ class TwoStageDataModule(pl.LightningDataModule):
         self.benchmark_eval_subset_size = benchmark_eval_subset_size
         self.benchmark_eval_seed = benchmark_eval_seed
         self.vocab_save_path = vocab_save_path
+        self.cath_vocab_path = cath_vocab_path
+        self.split_manifest_path = split_manifest_path
+        self.split_group_col = split_group_col
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
         self.shuffle_seed = shuffle_seed
@@ -125,24 +137,65 @@ class TwoStageDataModule(pl.LightningDataModule):
         if self.train_dataset is not None:
             return
         files = resolve_parquet_inputs(self.data_parquet_folder)
-        df = _load_paths(files)
-        df = df.sample(frac=1, random_state=self.shuffle_seed).reset_index(drop=True)
-        n = len(df)
-        n_val = max(1, int(n * self.val_ratio))
-        n_test = max(1, int(n * self.test_ratio))
-        n_train = max(1, n - n_val - n_test)
-        train_df = df.iloc[:n_train].reset_index(drop=True)
-        val_df = df.iloc[n_train : n_train + n_val].reset_index(drop=True)
-        test_df = df.iloc[n_train + n_val :].reset_index(drop=True)
+        df = _load_paths(files).reset_index(drop=True)
+        if self.split_manifest_path:
+            manifest_path = Path(self.split_manifest_path).expanduser()
+            if not manifest_path.is_absolute():
+                manifest_path = (PROJECT_ROOT / manifest_path).resolve()
+            if manifest_path.exists():
+                manifest = load_and_validate_split_manifest(df, manifest_path)
+                rank_zero_info(f"Loaded frozen split manifest -> {manifest_path}")
+            else:
+                manifest = build_split_manifest(
+                    df,
+                    val_ratio=self.val_ratio,
+                    test_ratio=self.test_ratio,
+                    seed=self.shuffle_seed,
+                    group_col=self.split_group_col,
+                )
+                save_split_manifest(manifest, manifest_path)
+                rank_zero_info(f"Created frozen split manifest -> {manifest_path}")
+        else:
+            manifest = build_split_manifest(
+                df,
+                val_ratio=self.val_ratio,
+                test_ratio=self.test_ratio,
+                seed=self.shuffle_seed,
+                group_col=self.split_group_col,
+            )
+            rank_zero_info(
+                "Using an in-memory group-aware split; pass --split_manifest_path "
+                "to freeze it for comparisons."
+            )
+        train_df, val_df, test_df = split_dataframe(df, manifest)
+        source = (
+            str(manifest["split_group_source"].iloc[0])
+            if "split_group_source" in manifest.columns
+            else self.split_group_col
+        )
+        rank_zero_info(
+            f"Split rows train/val/test={len(train_df)}/{len(val_df)}/{len(test_df)}; "
+            f"group source={source}"
+        )
 
         # Build the CATH vocab from TRAIN labels only (no leakage).
         codes = extract_cath_codes(train_df["chopping_star"].astype(str).tolist())
-        self.cath_vocab = CathVocab.build(codes, min_count=self.cath_min_count)
+        requested_vocab_path = self.cath_vocab_path or self.vocab_save_path
+        resolved_vocab_path = None
+        if requested_vocab_path:
+            resolved_vocab_path = Path(requested_vocab_path).expanduser()
+            if not resolved_vocab_path.is_absolute():
+                resolved_vocab_path = (PROJECT_ROOT / resolved_vocab_path).resolve()
+        if resolved_vocab_path is not None and resolved_vocab_path.exists():
+            self.cath_vocab = CathVocab.load(resolved_vocab_path)
+            rank_zero_info(f"Loaded frozen CATH vocab -> {resolved_vocab_path}")
+        else:
+            self.cath_vocab = CathVocab.build(codes, min_count=self.cath_min_count)
+            if resolved_vocab_path is not None:
+                resolved_vocab_path.parent.mkdir(parents=True, exist_ok=True)
+                self.cath_vocab.save(resolved_vocab_path)
+                rank_zero_info(f"Saved frozen CATH vocab -> {resolved_vocab_path}")
         rank_zero_info(f"CATH vocab level sizes: {self.cath_vocab.level_sizes}")
-        if self.vocab_save_path:
-            Path(self.vocab_save_path).parent.mkdir(parents=True, exist_ok=True)
-            self.cath_vocab.save(self.vocab_save_path)
-            rank_zero_info(f"Saved CATH vocab -> {self.vocab_save_path}")
 
         self.train_dataset = TwoStageDataset(train_df, self.cath_vocab, self.max_len)
         self.val_dataset = TwoStageDataset(val_df, self.cath_vocab, self.max_len)
@@ -208,9 +261,13 @@ class TwoStageLightningModule(pl.LightningModule):
         label_smoothing: float = 0.1,
         residue_loss_weight: float = 1.0,
         pair_loss_weight: float = 1.0,
-        deletion_loss_weight: float = 0.25,
-        linker_dropout_loss_weight: float = 0.25,
-        artificial_deletion_loss_weight: float = 0.10,
+        deletion_loss_weight: float = 0.0,
+        deletion_budget_loss_weight: float = 0.0,
+        linker_dropout_loss_weight: float = 0.0,
+        empirical_shrink_loss_weight: float = 0.0,
+        empirical_shrink_max_deleted_fraction: float = 0.9,
+        empirical_shrink_full_state_probability: float = 0.25,
+        artificial_deletion_loss_weight: float = 0.0,
         artificial_noise_t_max: float = 0.9,
         artificial_noise_alpha_rate: float = 1.1,
         artificial_noise_max_insertions: int = 128,
@@ -221,6 +278,8 @@ class TwoStageLightningModule(pl.LightningModule):
         min_domain_len: int = 20,
         benchmark_num_logged_samples: int = 5,
         deletion_head_input: str = "trunk",
+        deletion_feature_integration: bool = False,
+        deletion_budget_source: str = "supervised",
         seed: int = 0,
         # ---- Tier 3: CATH long-tail handling (CATH head only) ----
         cath_loss_type: str = "ce",          # ce | focal | class_balanced | cb_focal
@@ -241,6 +300,8 @@ class TwoStageLightningModule(pl.LightningModule):
             esm_chunk_size=esm_chunk_size, esm_chunk_overlap=esm_chunk_overlap,
             esm_dtype=esm_dtype,
             deletion_head_input=deletion_head_input,
+            deletion_feature_integration=deletion_feature_integration,
+            deletion_budget_source=deletion_budget_source,
         )
         self.benchmark_eval_config = EvalConfig(input_indexing="one_based_inclusive")
         self._pair_gen = torch.Generator().manual_seed(int(seed) + 101)
@@ -307,6 +368,9 @@ class TwoStageLightningModule(pl.LightningModule):
             max_pair_len=self.hparams.max_pair_len, generator=self._pair_gen,
         )
         deletion_loss = losses.deletion_ce_loss(out["deletion_logit"], assign, mask)
+        deletion_budget_loss = losses.deletion_budget_loss(
+            out["deletion_budget_fraction"], assign, mask
+        )
         linker_dropout_loss = torch.zeros((), device=self.device)
         if self.training and self.hparams.linker_dropout_loss_weight > 0:
             kept_mask, target_mask, linker_budget = diffusion.make_linker_dropout_batch(
@@ -321,6 +385,38 @@ class TwoStageLightningModule(pl.LightningModule):
                 )
                 linker_dropout_loss = losses.deletion_mask_ce_loss(
                     linker_dropout_logit, target_mask, kept_mask
+                )
+        empirical_shrink_loss = torch.zeros((), device=self.device)
+        if self.training and self.hparams.empirical_shrink_loss_weight > 0:
+            shrunk = diffusion.make_empirical_shrink_batch(
+                batch["sequences"],
+                assign,
+                mask,
+                max_deleted_fraction=float(
+                    self.hparams.empirical_shrink_max_deleted_fraction
+                ),
+                full_state_probability=float(
+                    self.hparams.empirical_shrink_full_state_probability
+                ),
+                generator=self._noise_gen,
+            )
+            if shrunk:
+                shrunk_sequences = [example.sequence for example in shrunk]
+                shrunk_emb, shrunk_mask = self.model.embed(shrunk_sequences)
+                shrunk_mask = shrunk_mask.to(self.device)
+                shrunk_budget = torch.tensor(
+                    [example.remaining_budget for example in shrunk],
+                    dtype=shrunk_emb.dtype,
+                    device=self.device,
+                )
+                shrunk_target = diffusion.pad_shrink_target_masks(
+                    shrunk, device=self.device
+                )
+                shrunk_deletion_logit = self.model.deletion_logits_from_embeddings(
+                    shrunk_emb, shrunk_mask, shrunk_budget
+                )
+                empirical_shrink_loss = losses.deletion_mask_ce_loss(
+                    shrunk_deletion_logit, shrunk_target, shrunk_mask
                 )
         artificial_deletion_loss = torch.zeros((), device=self.device)
         if self.training and self.hparams.artificial_deletion_loss_weight > 0:
@@ -368,7 +464,9 @@ class TwoStageLightningModule(pl.LightningModule):
             self.hparams.residue_loss_weight * res_loss
             + self.hparams.pair_loss_weight * pair_loss
             + self.hparams.deletion_loss_weight * deletion_loss
+            + self.hparams.deletion_budget_loss_weight * deletion_budget_loss
             + self.hparams.linker_dropout_loss_weight * linker_dropout_loss
+            + self.hparams.empirical_shrink_loss_weight * empirical_shrink_loss
             + self.hparams.artificial_deletion_loss_weight * artificial_deletion_loss
             + self.hparams.cath_loss_weight * cath_loss
         )
@@ -376,8 +474,12 @@ class TwoStageLightningModule(pl.LightningModule):
             "res": res_loss,
             "pair": pair_loss,
             "deletion": deletion_loss,
+            "deletion_budget": deletion_budget_loss,
             "deletion_linker_dropout": linker_dropout_loss,
+            "deletion_empirical_shrink": empirical_shrink_loss,
             "deletion_artificial": artificial_deletion_loss,
+            "deletion_feature_gate": self.model.seg_head.deletion_feature_gate.detach(),
+            "predicted_budget_fraction": out["deletion_budget_fraction"].detach().mean(),
             "cath": cath_loss,
         }
 
@@ -387,8 +489,12 @@ class TwoStageLightningModule(pl.LightningModule):
         self.log("train_res_loss", parts["res"], on_step=True, on_epoch=False)
         self.log("train_pair_loss", parts["pair"], on_step=True, on_epoch=False)
         self.log("train_deletion_loss", parts["deletion"], on_step=True, on_epoch=False)
+        self.log("train_deletion_budget_loss", parts["deletion_budget"], on_step=True, on_epoch=False)
         self.log("train_linker_dropout_deletion_loss", parts["deletion_linker_dropout"], on_step=True, on_epoch=False)
+        self.log("train_empirical_shrink_deletion_loss", parts["deletion_empirical_shrink"], on_step=True, on_epoch=False)
         self.log("train_artificial_deletion_loss", parts["deletion_artificial"], on_step=True, on_epoch=False)
+        self.log("train_deletion_feature_gate", parts["deletion_feature_gate"], on_step=True, on_epoch=False)
+        self.log("train_predicted_budget_fraction", parts["predicted_budget_fraction"], on_step=True, on_epoch=False)
         self.log("train_cath_loss", parts["cath"], on_step=True, on_epoch=False)
         return total
 
@@ -398,8 +504,12 @@ class TwoStageLightningModule(pl.LightningModule):
         self.log("eval_res_loss", parts["res"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_pair_loss", parts["pair"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_deletion_loss", parts["deletion"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_deletion_budget_loss", parts["deletion_budget"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_linker_dropout_deletion_loss", parts["deletion_linker_dropout"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_empirical_shrink_deletion_loss", parts["deletion_empirical_shrink"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_artificial_deletion_loss", parts["deletion_artificial"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_deletion_feature_gate", parts["deletion_feature_gate"], on_step=False, on_epoch=True, sync_dist=True)
+        self.log("eval_predicted_budget_fraction", parts["predicted_budget_fraction"], on_step=False, on_epoch=True, sync_dist=True)
         self.log("eval_cath_loss", parts["cath"], on_step=False, on_epoch=True, sync_dist=True)
         return total
 
@@ -579,6 +689,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--test_ratio", type=float, default=0.1)
     p.add_argument("--shuffle_seed", type=int, default=42)
+    p.add_argument(
+        "--split_manifest_path",
+        type=str,
+        default="artifacts/two_stage_experiment/split_manifest.csv",
+        help="Frozen row/group split manifest shared by every comparison arm.",
+    )
+    p.add_argument(
+        "--split_group_col",
+        type=str,
+        default="auto",
+        help="Homology group column, or auto (homology column then augmentation source).",
+    )
+    p.add_argument(
+        "--cath_vocab_path",
+        type=str,
+        default="artifacts/two_stage_experiment/cath_vocab.json",
+        help="Frozen train-only CATH vocabulary shared by every comparison arm.",
+    )
     p.add_argument("--seed", type=int, default=0)
     # model
     p.add_argument("--esm_model_name", type=str, default="esm2_t33_650M_UR50D")
@@ -593,6 +721,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--deletion_head_input", type=str, default="esm_trunk",
                    choices=["trunk", "esm_trunk"],
                    help="Features consumed by the deletion diffusion head.")
+    p.add_argument(
+        "--deletion_feature_integration",
+        action="store_true",
+        help="Feed deletion evidence and local jumps into Stage A residue/pair heads.",
+    )
+    p.add_argument(
+        "--deletion_budget_source",
+        type=str,
+        default="supervised",
+        choices=["supervised", "predicted"],
+        help="Use true training budgets + residue estimate at inference, or a learned budget head.",
+    )
     p.add_argument("--esm_dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     p.add_argument("--esm_chunk_size", type=int, default=1022)
     p.add_argument("--esm_chunk_overlap", type=int, default=256)
@@ -607,20 +747,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--deletion_loss_weight",
         type=float,
-        default=0.25,
+        default=0.0,
         help="Auxiliary SCISOR-style deletion CE weight over known non-domain residues.",
+    )
+    p.add_argument(
+        "--deletion_budget_loss_weight",
+        type=float,
+        default=0.0,
+        help="Smooth-L1 weight for the learned remaining non-domain fraction.",
     )
     p.add_argument(
         "--linker_dropout_loss_weight",
         type=float,
-        default=0.25,
-        help="Training-only empirical deletion-diffusion CE over randomly retained true linker residues.",
+        default=0.0,
+        help="Legacy fixed-length masking ablation; does not physically delete/re-embed residues.",
     )
+    p.add_argument(
+        "--empirical_shrink_loss_weight",
+        type=float,
+        default=0.0,
+        help="Deletion CE on physically shortened full-protein -> domain-residue states.",
+    )
+    p.add_argument("--empirical_shrink_max_deleted_fraction", type=float, default=0.9)
+    p.add_argument("--empirical_shrink_full_state_probability", type=float, default=0.25)
     p.add_argument(
         "--artificial_deletion_loss_weight",
         type=float,
-        default=0.10,
-        help="Training-only deletion CE weight for SCISOR-style artificial insertions.",
+        default=0.0,
+        help="Artificial insertion ablation; off by default for the TED empirical path.",
     )
     p.add_argument("--artificial_noise_t_max", type=float, default=0.9)
     p.add_argument("--artificial_noise_alpha_rate", type=float, default=1.1)
@@ -673,7 +827,6 @@ def main():
     if args.accelerator == "gpu" and not torch.cuda.is_available():
         raise RuntimeError("accelerator=gpu requested but CUDA is not available.")
 
-    vocab_path = str(Path(args.save_dir) / "cath_vocab.json")
     dm = TwoStageDataModule(
         data_parquet_folder=args.data_parquet_folder,
         batch_size=args.batch_size,
@@ -682,7 +835,9 @@ def main():
         cath_min_count=args.cath_min_count,
         benchmark_eval_subset_size=args.benchmark_eval_subset_size,
         benchmark_eval_seed=args.benchmark_eval_seed,
-        vocab_save_path=vocab_path,
+        cath_vocab_path=args.cath_vocab_path,
+        split_manifest_path=args.split_manifest_path,
+        split_group_col=args.split_group_col,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         shuffle_seed=args.shuffle_seed,
@@ -715,7 +870,11 @@ def main():
         residue_loss_weight=args.residue_loss_weight,
         pair_loss_weight=args.pair_loss_weight,
         deletion_loss_weight=args.deletion_loss_weight,
+        deletion_budget_loss_weight=args.deletion_budget_loss_weight,
         linker_dropout_loss_weight=args.linker_dropout_loss_weight,
+        empirical_shrink_loss_weight=args.empirical_shrink_loss_weight,
+        empirical_shrink_max_deleted_fraction=args.empirical_shrink_max_deleted_fraction,
+        empirical_shrink_full_state_probability=args.empirical_shrink_full_state_probability,
         artificial_deletion_loss_weight=args.artificial_deletion_loss_weight,
         artificial_noise_t_max=args.artificial_noise_t_max,
         artificial_noise_alpha_rate=args.artificial_noise_alpha_rate,
@@ -726,6 +885,8 @@ def main():
         cluster_method=args.cluster_method, min_domain_len=args.min_domain_len,
         benchmark_num_logged_samples=args.benchmark_num_logged_samples,
         deletion_head_input=args.deletion_head_input,
+        deletion_feature_integration=args.deletion_feature_integration,
+        deletion_budget_source=args.deletion_budget_source,
         seed=args.seed,
         cath_loss_type=args.cath_loss_type,
         focal_gamma=args.focal_gamma,
@@ -748,6 +909,26 @@ def main():
             }
         else:
             state = ckpt
+        source_vocab_dict = ckpt.get("cath_vocab")
+        vocab_compatible = False
+        if source_vocab_dict is not None:
+            try:
+                source_vocab = CathVocab.from_dict(source_vocab_dict)
+                vocab_compatible = (
+                    source_vocab.level_token2id == dm.cath_vocab.level_token2id
+                )
+            except (KeyError, TypeError, ValueError):
+                vocab_compatible = False
+        if not vocab_compatible:
+            state = {
+                key: value
+                for key, value in state.items()
+                if not key.startswith("cath_head.")
+            }
+            rank_zero_info(
+                "Initialization CATH vocabulary differs or is unavailable; "
+                "CATH-head weights will be reinitialized to preserve label-ID semantics."
+            )
         current = model.model.state_dict()
         compatible = {}
         skipped_shape = []
