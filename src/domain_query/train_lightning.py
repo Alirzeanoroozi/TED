@@ -171,7 +171,6 @@ class DomainQueryLightningModule(pl.LightningModule):
         params = [param for param in self.parameters() if param.requires_grad]
         return torch.optim.AdamW(params, lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
-
 def main():
     config_path = "configs/domain_query_config.yaml"
     if len(sys.argv) > 1:
@@ -243,7 +242,6 @@ def main():
         args.save_path,
     )
     print(f"Saved checkpoint to {args.save_path}")
-
 
 if __name__ == "__main__":
     main()

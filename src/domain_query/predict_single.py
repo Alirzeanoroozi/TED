@@ -1,12 +1,7 @@
-"""Predict domains, CATH labels and per-domain confidence for one protein sequence."""
-
-from __future__ import annotations
-
 import argparse
 import json
 import sys
 from pathlib import Path
-
 import torch
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +36,6 @@ def load_model_and_vocabs(checkpoint_path: str, config_path: str):
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, cath_vocabs, args
-
 
 @torch.no_grad()
 def predict_one_sequence(model, cath_vocabs, args, sequence: str) -> dict:

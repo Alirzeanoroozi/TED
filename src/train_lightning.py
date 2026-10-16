@@ -1,12 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-<<<<<<< HEAD
-from torch.utils.data import DataLoader, WeightedRandomSampler
-=======
 from torch.utils.data import DataLoader, Sampler, Subset
 from dotenv import load_dotenv
->>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 import wandb
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
@@ -100,16 +96,11 @@ class TEDDataModule(pl.LightningDataModule):
         )
 
     def train_dataloader(self):
-<<<<<<< HEAD
-        if self.weighted_sampling and self.train_sample_weights is not None:
-            sampler = WeightedRandomSampler(weights=self.train_sample_weights, num_samples=len(self.train_sample_weights), replacement=True)
-=======
         if self.weighted_sampling and self._train_sample_weights is not None:
             sampler = _StreamingWeightedSampler(
                 weights=self._train_sample_weights,
                 num_samples=len(self._train_sample_weights),
             )
->>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
             return self._build_loader(self.train_dataset, shuffle=False, sampler=sampler)
         return self._build_loader(self.train_dataset, shuffle=True)
 
@@ -401,10 +392,6 @@ class PeriodicBenchmarkEvalCallback(Callback):
                     trainer.logger.experiment.log({"benchmark_samples": sample_table}, step=global_step)
 
 def main():
-<<<<<<< HEAD
-    config = "configs/lightning_config.yaml"
-    args = load_config(config)
-=======
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data_parquet_folder",
@@ -481,7 +468,6 @@ def main():
                 "PyTorch was built with CUDA support, but no CUDA device is available to this job. "
                 "Check the Slurm GPU allocation and CUDA runtime visibility."
             )
->>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 
     dm = TEDDataModule(
         data_parquet_folder=args.data_parquet_folder,
@@ -530,12 +516,8 @@ def main():
         callbacks=[checkpoint_callback, benchmark_callback],
         gradient_clip_val=args.max_grad_norm,
     )
-<<<<<<< HEAD
-    trainer.fit(model, datamodule=dm)
-=======
 
     trainer.fit(model, datamodule=dm, ckpt_path=args.resume_from_checkpoint)
->>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 
     torch.save(
         {

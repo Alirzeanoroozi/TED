@@ -9,7 +9,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --mem=80G
 #SBATCH --output=logs/ted_domain_query_train.out
-#SBATCH --error=logs/ted_domain_query_train.err
+#SBATCH --error=logs/ted_domain_query_train.out
 
 CONDA_BASE=$(conda info --base)
 source ${CONDA_BASE}/bin/activate comp

@@ -1,36 +1,12 @@
-"""ESM-2 encoder + learned domain queries (DETR / Mask2Former style).
-
-Each query predicts one domain: a mask over residues, a CATH label (C, A, T, H) and a confidence score.
-Queries are matched to the true domains with the Hungarian algorithm, so domain order does not matter.
-"""
-
-from __future__ import annotations
-
 import math
 import re
-from contextlib import nullcontext
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
-
-from residue_mlm.labels import AA_ALPHABET, PAD_ID, SPECIAL_VOCAB_SIZE
+import esm
 
 CATH_LEVELS = ("cath_c", "cath_a", "cath_t", "cath_h")
-
-
-def load_esm2(esm_model_name: str):
-    try:
-        import esm
-    except ImportError as exc:
-        raise ImportError("ESM-2 requires the 'esm' package. Install it with 'pip install fair-esm'.") from exc
-
-    loader = getattr(esm.pretrained, esm_model_name, None)
-    if loader is None:
-        raise ValueError(f"Unknown ESM-2 model '{esm_model_name}' in esm.pretrained.")
-    return loader()
-
 
 class DomainQueryModel(nn.Module):
     def __init__(
@@ -51,31 +27,17 @@ class DomainQueryModel(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.freeze_esm = freeze_esm
-        self.esm = None
 
-        if esm_model_name:
-            # Residue embeddings from pretrained ESM-2
-            self.esm, alphabet = load_esm2(esm_model_name)
-            self.esm_batch_converter = alphabet.get_batch_converter()
-            self.esm_repr_layer = int(re.search(r"_t(\d+)_", esm_model_name).group(1))
-            self.input_proj = nn.Linear(self.esm.embed_dim, d_model)
-            if freeze_esm:
-                for param in self.esm.parameters():
-                    param.requires_grad = False
-        else:
-            # Small transformer trained from scratch (no ESM)
-            self.aa_embed = nn.Embedding(SPECIAL_VOCAB_SIZE + len(AA_ALPHABET), d_model, padding_idx=PAD_ID)
-            self.position_embed = nn.Embedding(max_len, d_model)
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=d_model,
-                nhead=nhead,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                activation="gelu",
-                batch_first=True,
-                norm_first=True,
-            )
-            self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        # Residue embeddings from pretrained ESM-2
+        self.esm, alphabet = getattr(esm.pretrained, esm_model_name, None)()
+
+        self.esm_batch_converter = alphabet.get_batch_converter()
+        self.esm_repr_layer = int(re.search(r"_t(\d+)_", esm_model_name).group(1))
+        self.input_proj = nn.Linear(self.esm.embed_dim, d_model)
+        for param in self.esm.parameters():
+            param.requires_grad = False
+        self.esm.eval()
+        
         self.residue_norm = nn.LayerNorm(d_model)
 
         # Domain queries: self-attention between queries + cross-attention to residues
@@ -96,25 +58,15 @@ class DomainQueryModel(nn.Module):
         self.score_head = nn.Linear(d_model, 1)
         self.cath_heads = nn.ModuleDict({level: nn.Linear(d_model, size) for level, size in cath_vocab_sizes.items()})
 
-    def train(self, mode: bool = True):
-        super().train(mode)
-        if self.esm is not None and self.freeze_esm:
-            self.esm.eval()
-        return self
-
     def encode_residues(self, sequences: list[str], aa_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        if self.esm is not None:
-            _, _, esm_tokens = self.esm_batch_converter([(str(i), seq) for i, seq in enumerate(sequences)])
-            esm_tokens = esm_tokens.to(aa_ids.device)
-            with torch.no_grad() if self.freeze_esm else nullcontext():
-                esm_out = self.esm(esm_tokens, repr_layers=[self.esm_repr_layer])
-            # drop <cls> at position 0; positions after seq_len are padding and get masked
-            hidden = esm_out["representations"][self.esm_repr_layer][:, 1 : aa_ids.size(1) + 1]
-            hidden = self.input_proj(hidden)
-        else:
-            positions = torch.arange(aa_ids.size(1), device=aa_ids.device).unsqueeze(0)
-            hidden = self.aa_embed(aa_ids) + self.position_embed(positions)
-            hidden = self.encoder(hidden, src_key_padding_mask=~attention_mask)
+        _, _, esm_tokens = self.esm_batch_converter([(str(i), seq) for i, seq in enumerate(sequences)])
+        esm_tokens = esm_tokens.to(aa_ids.device)
+        with torch.no_grad():
+            esm_out = self.esm(esm_tokens, repr_layers=[self.esm_repr_layer])
+        # drop <cls> at position 0; positions after seq_len are padding and get masked
+        hidden = esm_out["representations"][self.esm_repr_layer][:, 1 : aa_ids.size(1) + 1]
+        hidden = self.input_proj(hidden)
+
         return self.residue_norm(hidden)
 
     def forward(self, sequences: list[str], aa_ids: torch.Tensor, attention_mask: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -190,12 +142,10 @@ class DomainQueryModel(nn.Module):
         metrics["loss"] = float(total.detach())
         return total, metrics
 
-
 def dice_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     probs = logits.sigmoid()
     dice = (2 * (probs * targets).sum(-1) + 1) / (probs.sum(-1) + targets.sum(-1) + 1)
     return (1 - dice).mean()
-
 
 @torch.no_grad()
 def match_queries(logits: torch.Tensor, gt_masks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

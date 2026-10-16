@@ -1,0 +1,51 @@
+# Data
+data_parquet_folder: "data/all_parquet"
+batch_size: 8
+max_len: 1022            # ESM-2 limit
+val_size: 1000
+test_size: 100
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+random_crop_train: true
+
+# Training
+lr: 0.0001
+weight_decay: 0.01
+max_grad_norm: 1.0
+max_epochs: 10
+save_path: "artifacts/domain_query_checkpoint.pt"
+
+# Checkpointing
+save_dir: "lightning_logs/domain_query"
+checkpoint_filename: "domain-query-{epoch:02d}-{val_loss:.4f}"
+checkpoint_monitor: "val_loss"
+checkpoint_mode: "min"
+save_top_k: 1
+
+# Encoder — set esm_model_name to null to train a small transformer from scratch instead
+esm_model_name: "esm2_t33_650M_UR50D"
+freeze_esm: true
+num_encoder_layers: 6    # only used when esm_model_name is null
+
+# Domain-query decoder
+d_model: 256
+nhead: 8
+num_decoder_layers: 3
+dim_feedforward: 1024
+dropout: 0.1
+num_queries: 16          # must be >= max domains per protein
+
+# Loss weights
+loss_weight_mask: 1.0
+loss_weight_score: 1.0
+loss_weight_cath: 0.5
+
+# Decoding: keep queries with confidence >= score_threshold, fill gaps <= max_gap, drop pieces < min_segment_len
+score_threshold: 0.5
+max_gap: 15
+min_segment_len: 20
+
+# Logging
+wandb_project: "ted-domain-query"
+wandb_run_name: "domain-query-esm2-650M"
