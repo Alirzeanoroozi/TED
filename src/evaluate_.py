@@ -4,9 +4,9 @@ from enum import Enum, auto
 from typing import Set
 import torch
 
-from data.dataset_ import load_data
-from tokenizer_ import TextTokenizer
-from model import TextToTextTransformer
+from data._dataset import load_data
+from data._tokenizer import TextTokenizer
+from model.model import TextToTextTransformer
 
 def greedy_decode(
     model: TextToTextTransformer,

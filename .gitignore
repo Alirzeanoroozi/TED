@@ -1,4 +1,3 @@
-artifacts/
 lightning_logs/
 
 # Weights & Biases experiment logs
@@ -9,5 +8,10 @@ benchmark/eval_out/
 benchmark/results/
 
 data/
+checkpoints/
+TED_Recreate/
 
 .DS_Store
+
+*.pyc
+logs/*

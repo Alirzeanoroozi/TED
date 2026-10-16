@@ -1,0 +1,54 @@
+# Data
+data_parquet_folder: "data/all_parquet"
+batch_size: 32
+max_len: 128
+val_size: 1000
+test_size: 100
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+random_crop_train: true
+
+# MLM masking
+mask_prob: 0.15
+mask_aa: true
+mask_cath: true
+mask_domain_id: true
+
+# Training
+lr: 0.0001
+weight_decay: 0.01
+max_grad_norm: 1.0
+max_epochs: 20
+save_path: "artifacts/residue_mlm_checkpoint.pt"
+
+# Checkpointing
+save_dir: "lightning_logs/residue_mlm"
+checkpoint_filename: "residue-mlm-{epoch:02d}-{val_loss:.4f}"
+checkpoint_monitor: "val_loss"
+checkpoint_mode: "min"
+save_top_k: 1
+
+# Model — exact position embeddings indexed 0..max_len-1
+d_model: 256
+nhead: 8
+num_layers: 6
+dim_feedforward: 1024
+dropout: 0.1
+max_num_domains: 32
+max_domain_index: 32
+
+# Multi-task loss weights
+loss_weight_aa: 1.0
+loss_weight_domain: 0.25
+loss_weight_cath_c: 0.5
+loss_weight_cath_a: 0.5
+loss_weight_cath_t: 0.5
+loss_weight_cath_h: 0.5
+
+# Sequence-only decoding eval (boundaries + CATH chopping_star metrics)
+eval_sequence_prediction: true
+
+# Logging
+wandb_project: "ted-residue-mlm"
+wandb_run_name: "residue-mlm-exact-pos-128"

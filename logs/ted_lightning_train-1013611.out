@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 499, in <module>
-    main()
-  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 454, in main
-    dm.setup()
-TypeError: TEDDataModule.setup() missing 1 required positional argument: 'stage'

@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 17, in <module>
-    class TEDDataModule(pl.LightningDataModule):
-  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 28, in TEDDataModule
-    def setup(self, stage: Optional[str] = None):
-                           ^^^^^^^^
-NameError: name 'Optional' is not defined

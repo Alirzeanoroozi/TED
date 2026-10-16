@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 476, in <module>
-    main()
-  File "/scratch/anoroozi25/TED/src/train_lightning.py", line 433, in main
-    model = TEDLightningModule(
-            ^^^^^^^^^^^^^^^^^^^
-TypeError: TEDLightningModule.__init__() got an unexpected keyword argument 'benchmark_num_logged_samples'
