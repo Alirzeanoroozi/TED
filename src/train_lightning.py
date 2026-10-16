@@ -1,7 +1,12 @@
 import numpy as np
 import torch
 import torch.nn as nn
+<<<<<<< HEAD
 from torch.utils.data import DataLoader, WeightedRandomSampler
+=======
+from torch.utils.data import DataLoader, Sampler, Subset
+from dotenv import load_dotenv
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 import wandb
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
@@ -15,6 +20,37 @@ from evaluate_ import greedy_decode, grammar_guided_decode
 from benchmark.ted_eval import EvalConfig, evaluate_target
 
 torch.set_float32_matmul_precision("high")
+
+class _StreamingWeightedSampler(Sampler):
+    """Memory-efficient weighted sampler.
+
+    PyTorch's built-in WeightedRandomSampler calls .tolist() on a tensor of
+    `num_samples` indices all at once, creating a ~46 MB Python list (28 bytes
+    per int × 1.29 M samples) that lives in RAM for the entire epoch.  It also
+    coerces the weights to float64 internally, doubling their footprint.
+
+    This sampler generates indices in small chunks so the peak extra allocation
+    is proportional to `chunk_size` (default 8 192 ≈ 230 KB), not to the full
+    epoch length.
+    """
+
+    def __init__(self, weights: torch.Tensor, num_samples: int, chunk_size: int = 8192):
+        self.weights = weights.float()  # keep as float32, not float64
+        self.num_samples = num_samples
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        remaining = self.num_samples
+        while remaining > 0:
+            n = min(self.chunk_size, remaining)
+            chunk = torch.multinomial(self.weights, n, replacement=True)
+            yield from chunk.tolist()
+            del chunk
+            remaining -= n
+
+    def __len__(self) -> int:
+        return self.num_samples
+
 
 class TEDDataModule(pl.LightningDataModule):
     def __init__(
@@ -64,8 +100,16 @@ class TEDDataModule(pl.LightningDataModule):
         )
 
     def train_dataloader(self):
+<<<<<<< HEAD
         if self.weighted_sampling and self.train_sample_weights is not None:
             sampler = WeightedRandomSampler(weights=self.train_sample_weights, num_samples=len(self.train_sample_weights), replacement=True)
+=======
+        if self.weighted_sampling and self._train_sample_weights is not None:
+            sampler = _StreamingWeightedSampler(
+                weights=self._train_sample_weights,
+                num_samples=len(self._train_sample_weights),
+            )
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
             return self._build_loader(self.train_dataset, shuffle=False, sampler=sampler)
         return self._build_loader(self.train_dataset, shuffle=True)
 
@@ -357,8 +401,87 @@ class PeriodicBenchmarkEvalCallback(Callback):
                     trainer.logger.experiment.log({"benchmark_samples": sample_table}, step=global_step)
 
 def main():
+<<<<<<< HEAD
     config = "configs/lightning_config.yaml"
     args = load_config(config)
+=======
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data_parquet_folder",
+        type=str,
+        default="data/all_parquet",
+        help="Path to a parquet directory or a single parquet file.",
+    )
+    parser.add_argument("--batch_size", type=int, default=8, help="Per-GPU batch size")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=0.01)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+    parser.add_argument("--d_model", type=int, default=256)
+    parser.add_argument("--nhead", type=int, default=8)
+    parser.add_argument("--num_encoder_layers", type=int, default=4)
+    parser.add_argument("--num_decoder_layers", type=int, default=4)
+    parser.add_argument("--dim_feedforward", type=int, default=1024)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--max_src_len", type=int, default=1024)
+    parser.add_argument("--max_tgt_len", type=int, default=256)
+    parser.add_argument("--save_path", type=str, default="transformer_checkpoint.pt", help="Final checkpoint path (PyTorch .pt)")
+    parser.add_argument("--save_dir", type=str, default="lightning_logs", help="Lightning checkpoint dir")
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--accelerator", type=str, default="auto")
+    parser.add_argument("--strategy", type=str, default="auto", help="e.g. ddp, ddp_spawn, auto")
+    parser.add_argument("--benchmark_eval_steps", type=int, default=1000, help="Run benchmark evaluation every N global training steps")
+    parser.add_argument("--benchmark_eval_subset_size", type=int, default=100, help="Number of validation examples used for periodic benchmark evaluation")
+    parser.add_argument("--benchmark_eval_seed", type=int, default=42, help="Seed for selecting the validation benchmark subset")
+    parser.add_argument(
+        "--benchmark_num_logged_samples",
+        type=int,
+        default=5,
+        help="Number of qualitative benchmark examples to log to W&B on each periodic evaluation",
+    )
+    parser.add_argument(
+        "--benchmark_eval_random_subset",
+        action="store_true",
+        help="Resample the validation benchmark subset on each periodic evaluation instead of reusing a fixed subset",
+    )
+    parser.add_argument(
+        "--weighted_sampling",
+        action="store_true",
+        help="Use WeightedRandomSampler to oversample rare CATH labels during training",
+    )
+    parser.add_argument(
+        "--sampling_alpha",
+        type=float,
+        default=0.2,
+        help="Exponent for frequency-based sampling weights: weight = 1/freq^alpha. "
+             "0=uniform, 0.1=~3x max boost, 0.2=~8x max boost (default: 0.2)",
+    )
+    parser.add_argument(
+        "--grammar_guided_decoding",
+        action="store_true",
+        help="Use grammar-guided FSM decoding during benchmark evaluation (guarantees parseable output)",
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="Path to a Lightning .ckpt file to resume training from (model + optimizer + epoch state).",
+    )
+    args = parser.parse_args()
+
+    if args.accelerator == "gpu":
+        if torch.version.cuda is None:
+            raise RuntimeError(
+                "PyTorch in the active environment is a CPU-only build "
+                f"(torch=={torch.__version__}, torch.version.cuda=None). "
+                "Install a CUDA-enabled PyTorch build in the current environment and rerun."
+            )
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "PyTorch was built with CUDA support, but no CUDA device is available to this job. "
+                "Check the Slurm GPU allocation and CUDA runtime visibility."
+            )
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 
     dm = TEDDataModule(
         data_parquet_folder=args.data_parquet_folder,
@@ -407,7 +530,12 @@ def main():
         callbacks=[checkpoint_callback, benchmark_callback],
         gradient_clip_val=args.max_grad_norm,
     )
+<<<<<<< HEAD
     trainer.fit(model, datamodule=dm)
+=======
+
+    trainer.fit(model, datamodule=dm, ckpt_path=args.resume_from_checkpoint)
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 
     torch.save(
         {

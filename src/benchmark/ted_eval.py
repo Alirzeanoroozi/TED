@@ -20,7 +20,6 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -202,11 +201,18 @@ def parse_annotation(annotation: Any, *, input_indexing: str = "one_based_inclus
     return parsed
 
 
+_MAX_RESIDUE_SPAN = 10_000  # guard: no real protein has a segment longer than this
+
+
 def _domain_residue_sets(parsed: ParsedAnnotation) -> List[set[int]]:
     residue_sets: List[set[int]] = []
     for domain in parsed.domains:
         residues: set[int] = set()
         for start, end in domain.segments:
+            # Cap pathologically large ranges from garbage greedy-decoder output.
+            # Allocating range(0, 9_999_999) causes MemoryError with 100-sample evals.
+            if end - start > _MAX_RESIDUE_SPAN:
+                end = start + _MAX_RESIDUE_SPAN
             residues.update(range(start, end))
         residue_sets.append(residues)
     return residue_sets
@@ -323,44 +329,59 @@ def _optimal_assignment(iou_matrix: np.ndarray) -> Tuple[float, List[Tuple[int, 
     if max(n_pred, n_gt) > 12:
         return _greedy_assignment(iou_matrix)
 
+    # Use an explicit memo dict instead of @lru_cache on a local function.
+    # @lru_cache on a locally-defined recursive closure creates a reference
+    # cycle (wrapper -> __wrapped__ -> closure -> wrapper) that the refcount
+    # GC cannot immediately collect.  With 200 evaluate_target calls per
+    # benchmark eval, the cache residue accumulates to hundreds of MB before
+    # gc.collect() runs.  A plain dict is freed the moment this function returns.
+    memo: dict = {}
+
     if n_pred <= n_gt:
-
-        @lru_cache(maxsize=None)
         def solve(i: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:
+            key = (i, used_mask)
+            if key in memo:
+                return memo[key]
             if i == n_pred:
-                return 0.0, tuple()
-
-            best_score = -1.0
-            best_pairs: Tuple[Tuple[int, int], ...] = tuple()
-            for j in range(n_gt):
-                if used_mask & (1 << j):
-                    continue
-                sub_score, sub_pairs = solve(i + 1, used_mask | (1 << j))
-                cand_score = float(iou_matrix[i, j]) + sub_score
-                if cand_score > best_score:
-                    best_score = cand_score
-                    best_pairs = ((i, j),) + sub_pairs
-            return best_score, best_pairs
+                result: Tuple[float, Tuple[Tuple[int, int], ...]] = (0.0, tuple())
+            else:
+                best_score = -1.0
+                best_pairs: Tuple[Tuple[int, int], ...] = tuple()
+                for j in range(n_gt):
+                    if used_mask & (1 << j):
+                        continue
+                    sub_score, sub_pairs = solve(i + 1, used_mask | (1 << j))
+                    cand_score = float(iou_matrix[i, j]) + sub_score
+                    if cand_score > best_score:
+                        best_score = cand_score
+                        best_pairs = ((i, j),) + sub_pairs
+                result = (best_score, best_pairs)
+            memo[key] = result
+            return result
 
         score, pairs = solve(0, 0)
         return float(score), list(pairs)
 
-    @lru_cache(maxsize=None)
-    def solve(j: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:
+    def solve(j: int, used_mask: int) -> Tuple[float, Tuple[Tuple[int, int], ...]]:  # type: ignore[misc]
+        key = (j, used_mask)
+        if key in memo:
+            return memo[key]
         if j == n_gt:
-            return 0.0, tuple()
-
-        best_score = -1.0
-        best_pairs: Tuple[Tuple[int, int], ...] = tuple()
-        for i in range(n_pred):
-            if used_mask & (1 << i):
-                continue
-            sub_score, sub_pairs = solve(j + 1, used_mask | (1 << i))
-            cand_score = float(iou_matrix[i, j]) + sub_score
-            if cand_score > best_score:
-                best_score = cand_score
-                best_pairs = ((i, j),) + sub_pairs
-        return best_score, best_pairs
+            result = (0.0, tuple())
+        else:
+            best_score = -1.0
+            best_pairs: Tuple[Tuple[int, int], ...] = tuple()
+            for i in range(n_pred):
+                if used_mask & (1 << i):
+                    continue
+                sub_score, sub_pairs = solve(j + 1, used_mask | (1 << i))
+                cand_score = float(iou_matrix[i, j]) + sub_score
+                if cand_score > best_score:
+                    best_score = cand_score
+                    best_pairs = ((i, j),) + sub_pairs
+            result = (best_score, best_pairs)
+        memo[key] = result
+        return result
 
     score, pairs = solve(0, 0)
     return float(score), list(pairs)
