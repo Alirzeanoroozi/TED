@@ -1,0 +1,20 @@
+[project]
+name = "ted_recreate"
+version = "0.1.0"
+description = "Chop proteins into domains and give them CATH labels the way TED (The Encyclopedia of Domains) did"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # our own code: ESMFold, lookups, benchmark figures (tested with torch 2.10 and 2.14, transformers 5.3 and 5.19)
+    "torch", "transformers", "accelerate", "numpy", "pandas", "matplotlib",
+    # what TED's parsers and consensus scripts import, pinned where TED pins them
+    "scipy", "networkx", "pdb-tools", "biopython==1.81", "einops==0.6.1", "natsort==8.3.1",
+    "rotary-embedding-torch==0.2.3", "pydantic==1.10.8",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ted_recreate"]

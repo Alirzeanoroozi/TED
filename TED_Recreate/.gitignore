@@ -1,0 +1,23 @@
+# downloads, builds and run outputs
+/vendor/
+/tools/
+/data/
+/db/
+/models/
+/.venv
+/runs/
+/logs/
+/docs/
+/Papers/
+/research/
+/.research-deps/
+__pycache__/
+*.egg-info/
+*.out
+
+# benchmark: keep the scripts, the report and the PNG figures
+/benchmark/*
+!/benchmark/*.py
+!/benchmark/REPORT.md
+!/benchmark/figures/
+/benchmark/figures/*.pdf
