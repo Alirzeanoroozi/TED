@@ -1,13 +1,6 @@
-
 import os
 from pathlib import Path
-
 import pandas as pd
-
-try:
-    import polars as pl
-except ImportError:  # pragma: no cover - optional dependency
-    pl = None
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHAINS_CSV = REPO_ROOT / "data" / "chains.ted.csv"
@@ -35,25 +28,13 @@ def iter_fasta_files(_roots):
                 fasta_files.append(os.path.join(root, file))
     return sorted(fasta_files)
 
-
-def write_parquet_frame(df, out_path):
-    try:
-        df.to_parquet(out_path, index=False)
-    except ImportError as exc:
-        if pl is None:
-            raise ImportError(
-                "Writing parquet requires pandas parquet support (pyarrow/fastparquet) "
-                "or an installed polars fallback."
-            ) from exc
-        pl.DataFrame(df.to_dict(orient="records")).write_parquet(str(out_path))
-
 def write_parquet_chunk(rows, chunk_idx):
     if not rows:
         return
     os.makedirs(PARQUET_DIR, exist_ok=True)
     df = pd.DataFrame(rows)
     out_path = PARQUET_DIR / f"ted_sequences_{chunk_idx:05d}.parquet"
-    write_parquet_frame(df, out_path)
+    df.to_parquet(out_path, index=False)
     print(f"[INFO] wrote {len(df)} rows to {out_path}")
 
 def create_parquet_shards():

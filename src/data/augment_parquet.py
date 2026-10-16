@@ -1,54 +1,16 @@
-"""
-Augment TED base parquet shards by cropping sequences only at valid inter-domain cut points.
-
-Example on the cluster from /scratch/erkmenerken22/TED:
-  source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh && conda activate ted
-  python src/data/augment_parquet.py --in_dir data/parquet_sequences --out_dir data/parquet_augmented --n_aug_per_chain 5 --seed 42
-"""
-
 import argparse
 import random
 import re
 import time
 from bisect import bisect_left, bisect_right
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
-
-try:
-    import pandas as pd
-except ImportError as exc:
-    raise SystemExit(
-        "augment_parquet.py requires pandas. "
-        "Activate the TED environment first, for example: "
-        "source /opt/ohpc/pub/compiler/conda3/latest/etc/profile.d/conda.sh && "
-        "conda activate gmconda_py3923"
-    ) from exc
-
-try:
-    import polars as pl
-except ImportError:  # pragma: no cover - optional dependency
-    pl = None
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+import pandas as pd
 
 DOMAIN_SPLIT_RE = re.compile(r"\s*\*\s*")
 SEGMENT_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 DEFAULT_PROGRESS_EVERY = 1000
 DEFAULT_DRY_RUN_ROWS = 5
-
-
-def detect_repo_root() -> Path:
-    start = Path(__file__).resolve().parent
-    for candidate in (start, *start.parents):
-        if (candidate / "data").exists() and (candidate / "src" / "data").exists():
-            return candidate
-    raise RuntimeError("Could not detect the TED repo root from src/data/augment_parquet.py")
-
-
-def resolve_path(raw_path: Union[str, Path], repo_root: Path) -> Path:
-    path = Path(raw_path).expanduser()
-    if path.is_absolute():
-        return path.resolve()
-    return (repo_root / path).resolve()
-
 
 def detect_input_dir(repo_root: Path) -> Path:
     preferred_dirs = [repo_root / "data" / "parquet_sequences", repo_root / "data" / "parquet_base"]
@@ -61,48 +23,15 @@ def detect_input_dir(repo_root: Path) -> Path:
         return parquet_files[0].parent
     return preferred_dirs[0]
 
-
 def list_parquet_files(in_dir: Path) -> List[Path]:
-    if in_dir.is_file():
-        if in_dir.suffix.lower() != ".parquet":
-            raise ValueError(f"Input file is not parquet: {in_dir}")
-        return [in_dir]
-    if not in_dir.exists():
-        raise FileNotFoundError(f"Input directory does not exist: {in_dir}")
-    if not in_dir.is_dir():
-        raise ValueError(f"Input path is neither a parquet file nor a directory: {in_dir}")
     parquet_files = sorted(in_dir.rglob("*.parquet"))
-    if not parquet_files:
-        raise FileNotFoundError(
-            f"No parquet files were found in {in_dir}. "
-            "Expected base shards under data/parquet_sequences or pass --in_dir explicitly."
-        )
     return parquet_files
 
-
 def read_parquet_frame(parquet_file: Path) -> pd.DataFrame:
-    try:
-        return pd.read_parquet(parquet_file)
-    except ImportError as exc:
-        if pl is None:
-            raise ImportError(
-                "Reading parquet requires pandas parquet support (pyarrow/fastparquet) "
-                "or an installed polars fallback."
-            ) from exc
-        return pd.DataFrame(pl.read_parquet(parquet_file).to_dicts())
-
+    return pd.read_parquet(parquet_file)
 
 def write_parquet_frame(df: pd.DataFrame, out_path: Path) -> None:
-    try:
-        df.to_parquet(out_path, index=False)
-    except ImportError as exc:
-        if pl is None:
-            raise ImportError(
-                "Writing parquet requires pandas parquet support (pyarrow/fastparquet) "
-                "or an installed polars fallback."
-            ) from exc
-        pl.DataFrame(df.to_dict(orient="records")).write_parquet(str(out_path))
-
+    df.to_parquet(out_path, index=False)
 
 def detect_target_column(columns: Iterable[str]) -> str:
     column_set = set(columns)

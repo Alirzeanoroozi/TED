@@ -11,6 +11,7 @@ torch>=2.0.0
 pandas>=1.5.0
 pytorch-lightning>=2.0.0
 wandb>=0.15.0
+PyYAML
 pydantic>=2.7.4
 python-dotenv>=1.0.0
 biopython>=1.80

@@ -39,6 +39,7 @@ data/*
 *.tsv
 
 # Model checkpoints & artifacts
+*.ckpt
 *.pt
 *.pth
 *.pth.tar
@@ -51,3 +52,12 @@ wandb/
 # Benchmark outputs (generated, not source)
 benchmark/eval_out/
 benchmark/results/
+
+data/
+checkpoints/
+TED_Recreate/
+
+.DS_Store
+
+*.pyc
+logs/*

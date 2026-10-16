@@ -1,0 +1,42 @@
+# Data
+data_parquet_folder: "data/all_parquet"
+batch_size: 8
+max_src_len: 1024
+max_tgt_len: 256
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+
+# Training
+lr: 0.0001
+weight_decay: 0.01
+max_grad_norm: 1.0
+max_epochs: 10
+save_path: "artifacts/transformer_checkpoint.pt"
+
+# Checkpointing
+save_dir: "lightning_logs"
+checkpoint_filename: "ted-{epoch:02d}-{eval_loss:.4f}"
+checkpoint_monitor: "eval_loss"
+checkpoint_mode: "min"
+save_top_k: 1
+
+# Model
+d_model: 256
+nhead: 4
+num_encoder_layers: 2
+num_decoder_layers: 2
+dim_feedforward: 512
+dropout: 0.1
+
+# Benchmark
+benchmark_eval_steps: 5000
+grammar_guided_decoding: true
+
+# Sampling
+weighted_sampling: false
+sampling_alpha: 0.2
+
+# Logging
+wandb_project: "ted-transformer"
+wandb_run_name: "ted-transformer-lightning"

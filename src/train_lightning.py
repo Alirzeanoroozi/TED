@@ -1,112 +1,25 @@
-import gc
-import os
-import re
-import sys
-import argparse
-from pathlib import Path
-
 import numpy as np
 import torch
 import torch.nn as nn
+<<<<<<< HEAD
+from torch.utils.data import DataLoader, WeightedRandomSampler
+=======
 from torch.utils.data import DataLoader, Sampler, Subset
 from dotenv import load_dotenv
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 import wandb
-
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
-from pytorch_lightning.utilities.rank_zero import rank_zero_info
 
-from data.dataset_ import collate_fn, create_train_val_test_datasets, _load_paths
-from tokenizer_ import TextTokenizer
-from model import TextToTextTransformer
-from evaluate import greedy_decode, grammar_guided_decode
+from config_utills import load_config
+from data._dataset import collate_fn, load_data, resolve_parquet_inputs, build_sample_weights, split_datasets
+from data._tokenizer import TextTokenizer
+from model.model import TextToTextTransformer
+from evaluate_ import greedy_decode, grammar_guided_decode
+from benchmark.ted_eval import EvalConfig, evaluate_target
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
-
-try:
-    from benchmark.ted_eval import EvalConfig, evaluate_target
-except ImportError:
-    from ted_eval import EvalConfig, evaluate_target
-
-
-def resolve_parquet_inputs(data_parquet_path: str) -> list[str]:
-    path = Path(data_parquet_path).expanduser()
-    if not path.is_absolute():
-        path = (PROJECT_ROOT / path).resolve()
-    else:
-        path = path.resolve()
-
-    if path.is_file():
-        if path.suffix.lower() != ".parquet":
-            raise ValueError(f"Expected a parquet file, got: {path}")
-        parquet_files = [str(path)]
-    elif path.is_dir():
-        parquet_files = sorted(str(parquet_file) for parquet_file in path.glob("*.parquet"))
-    else:
-        raise FileNotFoundError(f"Data path does not exist: {path}")
-
-    if not parquet_files:
-        raise RuntimeError(f"No .parquet files found under {path}")
-
-    return parquet_files
-
-
-_CATH_RE = re.compile(r"\|\s*([\d.]+)")
-
-
-def _extract_cath_labels(chopping_star: str) -> list:
-    """Return all CATH class labels found in a chopping_star string."""
-    return _CATH_RE.findall(chopping_star)
-
-
-def _build_sample_weights(
-    train_df,
-    alpha: float = 0.2,
-) -> torch.Tensor:
-    """Compute per-sample WeightedRandomSampler weights.
-
-    Strategy: weight = 1 / freq^alpha, where alpha controls smoothing strength.
-
-        alpha=0.0  ->  uniform sampling (no rebalancing)
-        alpha=0.1  ->  ~3x max oversampling of rarest vs most common class
-        alpha=0.2  ->  ~8x max oversampling  (recommended default)
-        alpha=0.5  ->  ~184x (old sqrt formula, too aggressive)
-
-    Using the rarest CATH label in a chain to set the chain's weight means
-    multi-domain chains containing a rare domain get boosted — the target
-    behaviour for improving rare-class coverage.
-
-    For samples with no parseable CATH label (unknown domains), assign the
-    median weight so they are sampled at the average rate.
-    """
-    chopping_stars = train_df["chopping_star"].astype(str).tolist()
-
-    # Count frequency of every CATH label across the whole training set.
-    freq: dict = {}
-    for cs in chopping_stars:
-        for label in _extract_cath_labels(cs):
-            freq[label] = freq.get(label, 0) + 1
-
-    raw_weights = []
-    for cs in chopping_stars:
-        labels = _extract_cath_labels(cs)
-        if labels:
-            rarest_freq = min(freq[lbl] for lbl in labels)
-            raw_weights.append(1.0 / (rarest_freq ** alpha))
-        else:
-            raw_weights.append(None)  # placeholder; filled below
-
-    # Fill unknowns with median of the known weights.
-    known = [w for w in raw_weights if w is not None]
-    median_w = float(np.median(known)) if known else 1.0
-    raw_weights = [w if w is not None else median_w for w in raw_weights]
-
-    weights = torch.tensor(raw_weights, dtype=torch.float)
-    return weights
-
+torch.set_float32_matmul_precision("high")
 
 class _StreamingWeightedSampler(Sampler):
     """Memory-efficient weighted sampler.
@@ -142,84 +55,37 @@ class _StreamingWeightedSampler(Sampler):
 class TEDDataModule(pl.LightningDataModule):
     def __init__(
         self,
-        data_parquet_folder: str,
-        batch_size: int = 8,
-        max_src_len: int = 512,
-        max_tgt_len: int = 256,
-        num_workers: int = 0,
-        benchmark_eval_subset_size: int = 100,
-        benchmark_eval_fixed_subset: bool = True,
-        benchmark_eval_seed: int = 42,
-        weighted_sampling: bool = False,
-        sampling_alpha: float = 0.2,
+        data_parquet_folder,
+        batch_size,
+        max_src_len,
+        max_tgt_len,
+        weighted_sampling,
+        sampling_alpha,
+        num_workers,
+        pin_memory,
+        persistent_workers,
     ):
         super().__init__()
         self.data_parquet_folder = data_parquet_folder
         self.batch_size = batch_size
         self.max_src_len = max_src_len
         self.max_tgt_len = max_tgt_len
-        self.num_workers = num_workers
-        self.benchmark_eval_subset_size = benchmark_eval_subset_size
-        self.benchmark_eval_fixed_subset = benchmark_eval_fixed_subset
-        self.benchmark_eval_seed = benchmark_eval_seed
         self.weighted_sampling = weighted_sampling
         self.sampling_alpha = sampling_alpha
-        self.src_tokenizer = None
-        self.tgt_tokenizer = None
-        self.train_dataset = None
-        self.val_dataset = None
-        self.test_dataset = None
-        self.benchmark_val_subset = None
-        self._benchmark_subset_calls = 0
-        self._train_sample_weights = None
-
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.persistent_workers = persistent_workers
+        self.train_sample_weights = None
+        
     def setup(self, stage: str | None = None):
-        if self.train_dataset is not None:
-            # Already set up (e.g. explicit call in main() before trainer.fit()).
-            # PL calls setup() again internally; skip to avoid loading all
-            # parquet files and recomputing sample weights a second time.
-            return
-        parquet_files = resolve_parquet_inputs(self.data_parquet_folder)
-        # Fit tokenizers on a subset of data (same columns as dataset: sequence, chopping_star)
-        df = _load_paths(parquet_files[:3] if len(parquet_files) >= 3 else parquet_files)
+        parquet_files = resolve_parquet_inputs(self.data_parquet_folder)    
+        df = load_data(parquet_files[:3])
         self.src_tokenizer = TextTokenizer().fit(df["sequence"].astype(str).tolist())
         self.tgt_tokenizer = TextTokenizer().fit(df["chopping_star"].astype(str).tolist())
-        self.train_dataset, self.val_dataset, self.test_dataset = create_train_val_test_datasets(
-            parquet_files,
-            self.src_tokenizer,
-            self.tgt_tokenizer,
-            self.max_src_len,
-            self.max_tgt_len,
-        )
+        self.train_dataset, self.val_dataset, self.test_dataset = split_datasets(parquet_files, self.src_tokenizer, self.tgt_tokenizer, self.max_src_len, self.max_tgt_len)
 
-        if self.weighted_sampling and self.train_dataset is not None:
-            self._train_sample_weights = _build_sample_weights(
-                self.train_dataset.df,
-                alpha=self.sampling_alpha,
-            )
-            rank_zero_info(
-                f"Weighted sampling enabled: {len(self._train_sample_weights)} samples, "
-                f"weight range [{self._train_sample_weights.min():.4f}, "
-                f"{self._train_sample_weights.max():.4f}], "
-                f"alpha={self.sampling_alpha}"
-            )
-
-        if self.val_dataset is not None and len(self.val_dataset) > 0:
-            self.benchmark_val_subset = Subset(self.val_dataset, self._select_benchmark_indices())
-
-    def _select_benchmark_indices(self):
-        subset_size = min(self.benchmark_eval_subset_size, len(self.val_dataset))
-        if subset_size <= 0:
-            return []
-
-        seed = self.benchmark_eval_seed
-        if not self.benchmark_eval_fixed_subset:
-            seed += self._benchmark_subset_calls
-            self._benchmark_subset_calls += 1
-
-        generator = torch.Generator().manual_seed(seed)
-        indices = torch.randperm(len(self.val_dataset), generator=generator)[:subset_size].tolist()
-        return indices
+        if self.weighted_sampling:
+            self.train_sample_weights = build_sample_weights(self.train_dataset.df, alpha=self.sampling_alpha)
 
     def _build_loader(self, dataset, shuffle: bool, sampler=None):
         return DataLoader(
@@ -227,36 +93,38 @@ class TEDDataModule(pl.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=shuffle if sampler is None else False,
             sampler=sampler,
-            collate_fn=lambda b: collate_fn(b, self.src_tokenizer.pad_id, self.tgt_tokenizer.pad_id),
+            collate_fn=lambda b: collate_fn(b, src_pad_id=self.src_tokenizer.pad_id, tgt_pad_id=self.tgt_tokenizer.pad_id),
             num_workers=self.num_workers,
-            pin_memory=(self.num_workers > 0),  # pinning is only beneficial with background workers
+            pin_memory=self.pin_memory,
+            persistent_workers=self.persistent_workers if self.num_workers > 0 else False,
         )
 
     def train_dataloader(self):
+<<<<<<< HEAD
+        if self.weighted_sampling and self.train_sample_weights is not None:
+            sampler = WeightedRandomSampler(weights=self.train_sample_weights, num_samples=len(self.train_sample_weights), replacement=True)
+=======
         if self.weighted_sampling and self._train_sample_weights is not None:
             sampler = _StreamingWeightedSampler(
                 weights=self._train_sample_weights,
                 num_samples=len(self._train_sample_weights),
             )
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
             return self._build_loader(self.train_dataset, shuffle=False, sampler=sampler)
         return self._build_loader(self.train_dataset, shuffle=True)
 
     def val_dataloader(self):
         return self._build_loader(self.val_dataset, shuffle=False)
 
-    def benchmark_val_dataloader(self):
-        if self.val_dataset is None or len(self.val_dataset) == 0:
-            return None
-        if not self.benchmark_eval_fixed_subset:
-            self.benchmark_val_subset = Subset(self.val_dataset, self._select_benchmark_indices())
-        return self._build_loader(self.benchmark_val_subset, shuffle=False)
-
+    def test_dataloader(self):
+        return self._build_loader(self.test_dataset, shuffle=False)
 
 class TEDLightningModule(pl.LightningModule):
     def __init__(
         self,
         src_vocab_size: int,
         tgt_vocab_size: int,
+        src_pad_id: int,
         tgt_pad_id: int,
         d_model: int = 256,
         nhead: int = 8,
@@ -269,11 +137,11 @@ class TEDLightningModule(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 0.01,
         max_grad_norm: float = 1.0,
-        benchmark_num_logged_samples: int = 5,
         grammar_guided_decoding: bool = False,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["tgt_pad_id"])
+        self.save_hyperparameters()
+        self.src_pad_id = src_pad_id
         self.tgt_pad_id = tgt_pad_id
         self.grammar_guided_decoding = grammar_guided_decoding
         self.model = TextToTextTransformer(
@@ -292,12 +160,7 @@ class TEDLightningModule(pl.LightningModule):
         self.benchmark_eval_config = EvalConfig(input_indexing="one_based_inclusive")
 
     def forward(self, src, tgt_in, src_key_padding_mask=None, tgt_key_padding_mask=None):
-        return self.model(
-            src,
-            tgt_in,
-            src_key_padding_mask=src_key_padding_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask,
-        )
+        return self.model(src, tgt_in, src_key_padding_mask=src_key_padding_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
     def _move_batch_to_device(self, batch):
         moved = {}
@@ -308,28 +171,24 @@ class TEDLightningModule(pl.LightningModule):
                 moved[key] = value
         return moved
 
-    def _shared_step(self, batch, src_pad_id, tgt_pad_id):
+    def _shared_step(self, batch):
         src = batch["src"]
         tgt_in = batch["tgt_in"]
         tgt_out = batch["tgt_out"]
-        src_key_padding_mask = src == src_pad_id
-        tgt_key_padding_mask = tgt_in == tgt_pad_id
+        src_key_padding_mask = src == self.src_pad_id
+        tgt_key_padding_mask = tgt_in == self.tgt_pad_id
         logits = self(src, tgt_in, src_key_padding_mask=src_key_padding_mask, tgt_key_padding_mask=tgt_key_padding_mask)
         loss = self.criterion(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
         return loss
 
     def training_step(self, batch, batch_idx):
-        src_pad_id = self.trainer.datamodule.src_tokenizer.pad_id
-        tgt_pad_id = self.trainer.datamodule.tgt_tokenizer.pad_id
-        loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
+        loss = self._shared_step(batch)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=batch["src"].size(0))
         return loss
 
     def validation_step(self, batch, batch_idx):
-        src_pad_id = self.trainer.datamodule.src_tokenizer.pad_id
-        tgt_pad_id = self.trainer.datamodule.tgt_tokenizer.pad_id
-        loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
-        self.log("eval_loss", loss, on_step=False, on_epoch=True, sync_dist=True)
+        loss = self._shared_step(batch)
+        self.log("eval_loss", loss, on_step=False, on_epoch=True, sync_dist=True, batch_size=batch["src"].size(0))
         return loss
 
     def _mean_metric(self, values):
@@ -337,74 +196,41 @@ class TEDLightningModule(pl.LightningModule):
             return float("nan")
         return float(np.nanmean(values))
 
-    def _run_single_decode_pass(self, dataloader, use_grammar_guided: bool):
-        """One full decode pass over `dataloader`.
-
-        Returns a raw dict of accumulated data — not yet averaged.
-        Caller must call self.eval() / torch.no_grad() before calling this.
-        """
-        src_pad_id = self.trainer.datamodule.src_tokenizer.pad_id
-        tgt_pad_id = self.trainer.datamodule.tgt_tokenizer.pad_id
+    def _run_single_decode_pass(self, dataloader):
         tgt_tokenizer = self.trainer.datamodule.tgt_tokenizer
-        max_logged_samples = max(0, int(self.hparams.benchmark_num_logged_samples))
 
-        metric_values = {
-            "iou_chain": [], "ndo": [], "correct_prop": [],
-            "correct_cath": [], "cath_level_score": [], "boundary_distance_score": [],
-        }
+        metric_values = {"iou_chain": [], "ndo": [], "correct_prop": [], "correct_cath": [], "cath_level_score": [], "boundary_distance_score": []}
         loss_sum = 0.0
         item_count = 0
         sample_rows = []
         gt_parse_ok_count = 0
         pred_parse_ok_count = 0
         domain_count_match_count = 0
-        gt_truncated_for_model_count = 0
 
         for batch in dataloader:
             batch = self._move_batch_to_device(batch)
             batch_size = batch["src"].size(0)
-            loss = self._shared_step(batch, src_pad_id, tgt_pad_id)
+            loss = self._shared_step(batch)
             loss_sum += float(loss.detach().cpu()) * batch_size
             item_count += batch_size
 
-            if use_grammar_guided:
-                generated_ids = grammar_guided_decode(
-                    self.model, batch["src"],
-                    src_pad_id=src_pad_id, tgt_pad_id=tgt_pad_id,
-                    sos_id=tgt_tokenizer.sos_id, eos_id=tgt_tokenizer.eos_id,
-                    max_len=self.hparams.max_tgt_len, device=self.device,
-                    token2id=tgt_tokenizer.token2id, id2token=tgt_tokenizer.id2token,
-                )
-            else:
-                generated_ids = greedy_decode(
-                    self.model, batch["src"],
-                    src_pad_id=src_pad_id, tgt_pad_id=tgt_pad_id,
-                    sos_id=tgt_tokenizer.sos_id, eos_id=tgt_tokenizer.eos_id,
-                    max_len=self.hparams.max_tgt_len, device=self.device,
-                )
+            generated_ids = grammar_guided_decode(
+                self.model,
+                batch["src"],
+                src_pad_id=self.src_pad_id,
+                tgt_pad_id=self.tgt_pad_id,
+                sos_id=tgt_tokenizer.sos_id,
+                eos_id=tgt_tokenizer.eos_id,
+                max_len=self.hparams.max_tgt_len,
+                device=self.device,
+                token2id=tgt_tokenizer.token2id,
+                id2token=tgt_tokenizer.id2token,
+            )
 
-            predictions = [
-                tgt_tokenizer.decode(row.tolist(), strip_special=True)
-                for row in generated_ids.detach().cpu()
-            ]
-            del generated_ids  # free GPU tensor immediately; don't wait for Python GC
+            predictions = [tgt_tokenizer.decode(row.tolist(), strip_special=True) for row in generated_ids.detach().cpu()]
 
-            # Cache src/tgt text fields before releasing the batch GPU tensors.
-            src_texts = batch["src_text"]
-            tgt_texts = batch["tgt_text"]
-            tgt_texts_model = batch["tgt_text_model"]
-            tgt_was_truncated_list = batch["tgt_was_truncated"]
-            del batch  # release GPU tensors (src, tgt_in, tgt_out) back to CUDA cache
-
-            for src_text, tgt_text, tgt_text_model, tgt_was_truncated, pred_text in zip(
-                src_texts, tgt_texts, tgt_texts_model,
-                tgt_was_truncated_list, predictions,
-            ):
-                metrics = evaluate_target(
-                    tgt_text, pred_text,
-                    nres=len(src_text), sequence=src_text,
-                    config=self.benchmark_eval_config,
-                )
+            for src_text, tgt_text, pred_text in zip(batch["src_text"], batch["tgt_text"], predictions):
+                metrics = evaluate_target(tgt_text, pred_text, nres=len(src_text), sequence=src_text, config=self.benchmark_eval_config)
                 metric_values["iou_chain"].append(float(metrics["iou_chain"]))
                 metric_values["ndo"].append(float(metrics["ndo"]))
                 metric_values["correct_prop"].append(float(metrics["correct_prop"]))
@@ -414,14 +240,11 @@ class TEDLightningModule(pl.LightningModule):
                 gt_parse_ok_count += int(bool(metrics["gt_parse_ok"]))
                 pred_parse_ok_count += int(bool(metrics["pred_parse_ok"]))
                 domain_count_match_count += int(bool(metrics["domain_count_match"]))
-                gt_truncated_for_model_count += int(bool(tgt_was_truncated))
 
-                if len(sample_rows) < max_logged_samples:
+                if len(sample_rows) < 5:
                     sample_rows.append({
                         "input_sequence": src_text,
                         "target_chopping_star": tgt_text,
-                        "target_chopping_star_model": tgt_text_model,
-                        "target_truncated_for_model": bool(tgt_was_truncated),
                         "predicted_chopping_star": pred_text,
                         "gt_parse_ok": bool(metrics["gt_parse_ok"]),
                         "pred_parse_ok": bool(metrics["pred_parse_ok"]),
@@ -448,7 +271,6 @@ class TEDLightningModule(pl.LightningModule):
             "gt_parse_ok_count": gt_parse_ok_count,
             "pred_parse_ok_count": pred_parse_ok_count,
             "domain_count_match_count": domain_count_match_count,
-            "gt_truncated_for_model_count": gt_truncated_for_model_count,
         }
 
     def _summarize_pass(self, raw: dict) -> dict:
@@ -466,7 +288,7 @@ class TEDLightningModule(pl.LightningModule):
             "gt_parse_ok_rate": raw["gt_parse_ok_count"] / n,
             "pred_parse_ok_rate": raw["pred_parse_ok_count"] / n,
             "domain_count_match_rate": raw["domain_count_match_count"] / n,
-            "target_truncated_for_model_rate": raw["gt_truncated_for_model_count"] / n,
+            # "target_truncated_for_model_rate": raw["gt_truncated_for_model_count"] / n,
         }
 
     def _build_samples_table(self, greedy_rows, guided_rows=None):
@@ -479,8 +301,7 @@ class TEDLightningModule(pl.LightningModule):
             return None
 
         base_cols = [
-            "input_sequence", "target_chopping_star", "target_chopping_star_model",
-            "target_truncated_for_model", "gt_parse_ok",
+            "input_sequence", "target_chopping_star", "gt_parse_ok",
             "gt_domain_count", "gt_parse_errors",
         ]
         greedy_cols = [
@@ -499,7 +320,7 @@ class TEDLightningModule(pl.LightningModule):
         for i, g_row in enumerate(greedy_rows):
             base = [
                 g_row["input_sequence"], g_row["target_chopping_star"],
-                g_row["target_chopping_star_model"], g_row["target_truncated_for_model"],
+                # g_row["target_chopping_star_model"], g_row["target_truncated_for_model"],
                 g_row["gt_parse_ok"], g_row["gt_domain_count"], g_row["gt_parse_errors"],
             ]
             greedy = [
@@ -522,88 +343,38 @@ class TEDLightningModule(pl.LightningModule):
 
         return table
 
-    def run_benchmark_evaluation(self, dataloader=None):
-        datamodule = self.trainer.datamodule
-        dataloader = dataloader or datamodule.benchmark_val_dataloader()
-        if dataloader is None:
-            return None
-
-        was_training = self.training
+    def run_benchmark_evaluation(self):
+        val_dataloader = self.trainer.datamodule.val_dataloader()
         self.eval()
-
         with torch.no_grad():
-            # Greedy decoding — always run, gives baseline metrics.
-            greedy_raw = self._run_single_decode_pass(dataloader, use_grammar_guided=False)
+            metrics = self._run_single_decode_pass(val_dataloader)
+        self.train()
 
-            # Grammar-guided decoding — run alongside greedy when the flag is set
-            # so both sets of metrics appear in W&B for direct comparison.
-            guided_raw = None
-            if self.grammar_guided_decoding:
-                guided_raw = self._run_single_decode_pass(dataloader, use_grammar_guided=True)
-
-        if was_training:
-            self.train()
-
-        if greedy_raw["item_count"] == 0:
+        if metrics["item_count"] == 0:
             return None
 
-        g = self._summarize_pass(greedy_raw)
+        summary = self._summarize_pass(metrics)
 
         out = {
-            # Shared loss and truncation (same regardless of decode strategy)
-            "eval_loss": g["eval_loss"],
-            "val_subset_eval_loss": g["eval_loss"],
-            "val_subset_gt_parse_ok_rate": g["gt_parse_ok_rate"],
-            "val_subset_target_truncated_for_model_rate": g["target_truncated_for_model_rate"],
-            # Greedy metrics — kept under both the original names (W&B backward compat)
-            # and explicit greedy-prefixed names.
-            "val_subset_iou_chain": g["iou_chain"],
-            "val_subset_ndo": g["ndo"],
-            "val_subset_correct_prop": g["correct_prop"],
-            "val_subset_correct_cath": g["correct_cath"],
-            "val_subset_cath_level_score": g["cath_level_score"],
-            "val_subset_boundary_distance_score": g["boundary_distance_score"],
-            "val_subset_pred_parse_ok_rate": g["pred_parse_ok_rate"],
-            "val_subset_domain_count_match_rate": g["domain_count_match_rate"],
-            # Explicit greedy prefix — shown alongside guided in W&B
-            "val_subset_greedy_iou_chain": g["iou_chain"],
-            "val_subset_greedy_ndo": g["ndo"],
-            "val_subset_greedy_correct_prop": g["correct_prop"],
-            "val_subset_greedy_correct_cath": g["correct_cath"],
-            "val_subset_greedy_cath_level_score": g["cath_level_score"],
-            "val_subset_greedy_boundary_distance_score": g["boundary_distance_score"],
-            "val_subset_greedy_pred_parse_ok_rate": g["pred_parse_ok_rate"],
+            "eval_loss": summary["eval_loss"],
+            "val_subset_eval_loss": summary["eval_loss"],
+            "val_subset_gt_parse_ok_rate": summary["gt_parse_ok_rate"],
+            "val_subset_iou_chain": summary["iou_chain"],
+            "val_subset_ndo": summary["ndo"],
+            "val_subset_correct_prop": summary["correct_prop"],
+            "val_subset_correct_cath": summary["correct_cath"],
+            "val_subset_cath_level_score": summary["cath_level_score"],
+            "val_subset_boundary_distance_score": summary["boundary_distance_score"],
+            "val_subset_pred_parse_ok_rate": summary["pred_parse_ok_rate"],
+            "val_subset_domain_count_match_rate": summary["domain_count_match_rate"],
         }
 
-        if guided_raw is not None and guided_raw["item_count"] > 0:
-            gu = self._summarize_pass(guided_raw)
-            out.update({
-                "val_subset_guided_iou_chain": gu["iou_chain"],
-                "val_subset_guided_ndo": gu["ndo"],
-                "val_subset_guided_correct_prop": gu["correct_prop"],
-                "val_subset_guided_correct_cath": gu["correct_cath"],
-                "val_subset_guided_cath_level_score": gu["cath_level_score"],
-                "val_subset_guided_boundary_distance_score": gu["boundary_distance_score"],
-                "val_subset_guided_pred_parse_ok_rate": gu["pred_parse_ok_rate"],
-            })
-            out["benchmark_samples_table"] = self._build_samples_table(
-                greedy_raw["sample_rows"], guided_raw["sample_rows"]
-            )
-        else:
-            out["benchmark_samples_table"] = self._build_samples_table(
-                greedy_raw["sample_rows"]
-            )
+        out["benchmark_samples_table"] = self._build_samples_table(metrics["sample_rows"])
 
         return out
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.hparams.lr,
-            weight_decay=self.hparams.weight_decay,
-        )
-        return optimizer
-
+        return torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
 
 class PeriodicBenchmarkEvalCallback(Callback):
     def __init__(self, eval_steps: int = 1000):
@@ -613,9 +384,7 @@ class PeriodicBenchmarkEvalCallback(Callback):
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         global_step = trainer.global_step
-        if self.eval_steps <= 0 or global_step == 0:
-            return
-        if global_step % self.eval_steps != 0 or global_step == self._last_eval_step:
+        if self.eval_steps <= 0 or global_step == 0 or global_step % self.eval_steps != 0 or global_step == self._last_eval_step:
             return
 
         self._last_eval_step = global_step
@@ -630,37 +399,12 @@ class PeriodicBenchmarkEvalCallback(Callback):
                 trainer.logger.log_metrics(metrics, step=global_step)
                 if sample_table is not None and isinstance(trainer.logger, WandbLogger):
                     trainer.logger.experiment.log({"benchmark_samples": sample_table}, step=global_step)
-                log_msg = (
-                    f"Benchmark eval step {global_step}: "
-                    f"eval_loss={metrics['eval_loss']:.4f} | "
-                    f"GREEDY  parse_ok={metrics['val_subset_greedy_pred_parse_ok_rate']:.2f} "
-                    f"iou={metrics['val_subset_greedy_iou_chain']:.4f} "
-                    f"ndo={metrics['val_subset_ndo']:.4f} "
-                    f"cath={metrics['val_subset_greedy_correct_cath']:.4f} "
-                    f"cath_lvl={metrics['val_subset_greedy_cath_level_score']:.4f} "
-                    f"bds={metrics['val_subset_greedy_boundary_distance_score']:.4f}"
-                )
-                if "val_subset_guided_iou_chain" in metrics:
-                    log_msg += (
-                        f" | GUIDED  parse_ok={metrics['val_subset_guided_pred_parse_ok_rate']:.2f} "
-                        f"iou={metrics['val_subset_guided_iou_chain']:.4f} "
-                        f"cath={metrics['val_subset_guided_correct_cath']:.4f} "
-                        f"cath_lvl={metrics['val_subset_guided_cath_level_score']:.4f} "
-                        f"bds={metrics['val_subset_guided_boundary_distance_score']:.4f}"
-                    )
-                rank_zero_info(log_msg)
-
-                # Explicitly release the table and metrics dict so wandb doesn't
-                # accumulate all logged tables in memory across 100+ eval steps.
-                del sample_table, metrics
-                gc.collect()
-                torch.cuda.empty_cache()  # return fragmented cached CUDA memory to the pool
-
-        if trainer.strategy is not None:
-            trainer.strategy.barrier("benchmark_eval_end")
-
 
 def main():
+<<<<<<< HEAD
+    config = "configs/lightning_config.yaml"
+    args = load_config(config)
+=======
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data_parquet_folder",
@@ -737,25 +481,25 @@ def main():
                 "PyTorch was built with CUDA support, but no CUDA device is available to this job. "
                 "Check the Slurm GPU allocation and CUDA runtime visibility."
             )
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 
     dm = TEDDataModule(
         data_parquet_folder=args.data_parquet_folder,
         batch_size=args.batch_size,
         max_src_len=args.max_src_len,
         max_tgt_len=args.max_tgt_len,
-        num_workers=args.num_workers,
-        benchmark_eval_subset_size=args.benchmark_eval_subset_size,
-        benchmark_eval_fixed_subset=not args.benchmark_eval_random_subset,
-        benchmark_eval_seed=args.benchmark_eval_seed,
         weighted_sampling=args.weighted_sampling,
         sampling_alpha=args.sampling_alpha,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+        persistent_workers=args.persistent_workers,
     )
-
     dm.setup()
 
     model = TEDLightningModule(
         src_vocab_size=dm.src_tokenizer.vocab_size,
         tgt_vocab_size=dm.tgt_tokenizer.vocab_size,
+        src_pad_id=dm.src_tokenizer.pad_id,
         tgt_pad_id=dm.tgt_tokenizer.pad_id,
         d_model=args.d_model,
         nhead=args.nhead,
@@ -767,60 +511,42 @@ def main():
         max_tgt_len=args.max_tgt_len,
         lr=args.lr,
         weight_decay=args.weight_decay,
-        benchmark_num_logged_samples=args.benchmark_num_logged_samples,
         grammar_guided_decoding=args.grammar_guided_decoding,
     )
 
-    load_dotenv()
-    wandb_api_key = os.getenv("WANDB_API_KEY")
-    if not wandb_api_key:
-        raise RuntimeError(
-            "WANDB_API_KEY is not set. Export it in the shell or source it from the Slurm job "
-            "before running training."
-        )
-
-    wandb.login(key=wandb_api_key)
-    wandb_logger = WandbLogger(
-        project=os.getenv("WANDB_PROJECT", "ted-transformer"),
-        name=os.getenv("WANDB_RUN_NAME", "ted-transformer-lightning"),
-        config=vars(args),
-    )
-
+    wandb_logger = WandbLogger(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.save_dir,
-        filename="ted-{epoch:02d}-{eval_loss:.4f}",
-        monitor="eval_loss",
-        mode="min",
-        save_top_k=1,
+        filename=args.checkpoint_filename,
+        monitor=args.checkpoint_monitor,
+        mode=args.checkpoint_mode,
+        save_top_k=args.save_top_k,
     )
     benchmark_callback = PeriodicBenchmarkEvalCallback(eval_steps=args.benchmark_eval_steps)
 
     trainer = pl.Trainer(
-        max_epochs=args.epochs,
-        accelerator=args.accelerator,
-        devices=1 if args.accelerator == "gpu" else "auto",
-        strategy=args.strategy,
+        max_epochs=args.max_epochs,
         logger=wandb_logger,
         callbacks=[checkpoint_callback, benchmark_callback],
         gradient_clip_val=args.max_grad_norm,
     )
+<<<<<<< HEAD
+    trainer.fit(model, datamodule=dm)
+=======
 
     trainer.fit(model, datamodule=dm, ckpt_path=args.resume_from_checkpoint)
+>>>>>>> d447f7382a2215f6310337bcd9d366b5ac2f69a7
 
-    if args.save_path and trainer.is_global_zero:
-        torch.save(
-            {
-                "model_state_dict": model.model.state_dict(),
-                "src_vocab_size": dm.src_tokenizer.vocab_size,
-                "tgt_vocab_size": dm.tgt_tokenizer.vocab_size,
-                "args": vars(args),
-            },
-            args.save_path,
-        )
-        print(f"Saved checkpoint to {args.save_path}")
-
-    wandb.finish()
-
+    torch.save(
+        {
+            "model_state_dict": model.model.state_dict(),
+            "src_vocab_size": dm.src_tokenizer.vocab_size,
+            "tgt_vocab_size": dm.tgt_tokenizer.vocab_size,
+            "args": vars(args),
+        },
+        args.save_path,
+    )
+    print(f"Saved checkpoint to {args.save_path}")
 
 if __name__ == "__main__":
     main()
